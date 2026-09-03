@@ -51,6 +51,13 @@ pub struct TextBuildResult {
   pub new_glyphs: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct MultilineBuildResult {
+  // Dimensions and position of the first line
+  pub first_line_rect: PointRect,
+  pub total: TextBuildResult,
+}
+
 impl<'a> SlugRendering<'a> {
   /// Note: make sure font_face and shaper target the same font (and index, if font is a collection)
   pub fn new(font_face: &'a Face<'a>, shaper: Shaper<'a>) -> Self {
@@ -379,13 +386,40 @@ impl<'a> SlugRendering<'a> {
     line_distance_mult: f32,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
-  ) -> TextBuildResult {
+  ) -> MultilineBuildResult {
     let line_distance = self.get_line_dist(line_distance_mult);
 
-    let mut total_rect = PointRect::REVERSED_INFINITY;
+    if text.is_empty() {
+      return MultilineBuildResult {
+        first_line_rect: PointRect::REVERSED_INFINITY,
+        total: TextBuildResult {
+          offset,
+          rect: PointRect::REVERSED_INFINITY,
+          new_glyphs: false,
+        },
+      };
+    }
+
+    let TextBuildResult {
+      rect: first_line_rect,
+      offset: first_offset,
+      new_glyphs: first_new_glyphs,
+    } = self.build_text(
+      text[0],
+      font_size,
+      vk::Offset2D {
+        x: offset.x,
+        y: offset.y,
+      },
+      vertices,
+      indices,
+    );
+
     let mut line_offset = line_distance;
-    let mut last_offset = offset;
-    let mut new_glyphs = false;
+    let mut total_rect = first_line_rect;
+    let mut last_offset = first_offset;
+    let mut new_glyphs = first_new_glyphs;
+
     for &line in text[1..].iter() {
       let TextBuildResult {
         rect: line_rect,
@@ -410,10 +444,13 @@ impl<'a> SlugRendering<'a> {
       }
     }
 
-    TextBuildResult {
-      offset: last_offset,
-      rect: total_rect,
-      new_glyphs,
+    MultilineBuildResult {
+      first_line_rect,
+      total: TextBuildResult {
+        offset: last_offset,
+        rect: total_rect,
+        new_glyphs,
+      },
     }
   }
 
