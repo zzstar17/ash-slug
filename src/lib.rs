@@ -1,8 +1,8 @@
 use ash::vk;
-use cgmath::{EuclideanSpace, Point2};
-use harfrust::{ShapeOptions, Shaper, UnicodeBuffer};
-use std::{collections::HashMap, fmt::Debug, mem::offset_of, ptr};
+use std::{fmt::Debug, mem::offset_of, ptr};
 use ttf_parser::Face;
+
+pub mod slug_rendering;
 
 pub const VERTICES_PER_GLYPH: usize = 4;
 pub const INDICES_PER_GLYPH: usize = 6;
@@ -14,54 +14,43 @@ const LINE_EPSILON: f32 = 0.125;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-/// Quadratic Bezier curve
+/// Represents a Quadratic Bezier curve
 pub struct QuadCurve {
-  pub p0: Point2<f32>,
-  pub p1: Point2<f32>,
-  pub p2: Point2<f32>,
+  pub p0: [f32; 2],
+  pub p1: [f32; 2],
+  pub p2: [f32; 2],
 }
 
 #[derive(Copy, Clone, Debug)]
+/// Rectangle area denominated by two points
 pub struct PointRect {
-  pub min: Point2<f32>,
-  pub max: Point2<f32>,
+  pub min: [f32; 2],
+  pub max: [f32; 2],
 }
 
 impl PointRect {
   pub const REVERSED_INFINITY: Self = PointRect {
-    min: Point2 {
-      x: f32::INFINITY,
-      y: f32::INFINITY,
-    },
-    max: Point2 {
-      x: f32::NEG_INFINITY,
-      y: f32::NEG_INFINITY,
-    },
+    min: [f32::INFINITY, f32::INFINITY],
+    max: [f32::NEG_INFINITY, f32::NEG_INFINITY],
   };
 
   pub fn width(&self) -> f32 {
-    self.max.x - self.min.x
+    self.max[0] - self.min[0]
   }
 
   pub fn height(&self) -> f32 {
-    self.max.y - self.min.y
+    self.max[1] - self.min[1]
   }
 
   /// Return PointRect that includes both
   pub fn or(self, other: PointRect) -> Self {
     Self {
-      min: Point2 {
-        x: self.min.x.min(other.min.x),
-        y: self.min.y.min(other.min.y),
-      },
-      max: Point2 {
-        x: self.max.x.max(other.max.x),
-        y: self.max.y.max(other.max.y),
-      },
+      min: [self.min[0].min(other.min[0]), self.min[1].min(other.min[1])],
+      max: [self.max[0].max(other.max[0]), self.max[1].max(other.max[1])],
     }
   }
 
-  pub fn to_vk_extent(self) -> vk::Extent2D {
+  pub fn into_vk_extent(self) -> vk::Extent2D {
     vk::Extent2D {
       width: self.width() as u32,
       height: self.height() as u32,
@@ -70,23 +59,20 @@ impl PointRect {
 }
 
 impl QuadCurve {
-  fn line_to_quadratic(a: Point2<f32>, b: Point2<f32>) -> Self {
-    let mut mid = Point2 {
-      x: (a.x + b.x) / 2.0,
-      y: (a.y + b.y) / 2.0,
-    };
-    let dif = b - a;
+  fn line_to_quadratic(a: [f32; 2], b: [f32; 2]) -> Self {
+    let mut mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let dif = [b[0] - a[0], b[1] - a[1]];
 
     // Perfectly degenerate quadratics interact badly with Slug's root eligibility
     // logic on diagonal segments, causing scanline dropouts. Keep axis-aligned
     // lines exact, but bow diagonal lines by an imperceptible amount so they
     // behave like ordinary quadratics.
-    if dif.x.abs() > 0.1 && dif.y.abs() > 0.1 {
-      let length = f32::hypot(mid.x, mid.y);
+    if dif[0].abs() > 0.1 && dif[1].abs() > 0.1 {
+      let length = f32::hypot(mid[0], mid[1]);
       if length > 0.0 {
         let inv_length = LINE_EPSILON / length;
-        mid.x -= dif.y * inv_length;
-        mid.y += dif.x * inv_length;
+        mid[0] -= dif[1] * inv_length;
+        mid[1] += dif[0] * inv_length;
       }
     }
 
@@ -98,8 +84,8 @@ impl QuadCurve {
   }
 
   fn bounding_box(&self) -> [f32; 4] {
-    let [x0, x1, x2] = [self.p0.x, self.p1.x, self.p2.x];
-    let [y0, y1, y2] = [self.p0.y, self.p1.y, self.p2.y];
+    let [x0, x1, x2] = [self.p0[0], self.p1[0], self.p2[0]];
+    let [y0, y1, y2] = [self.p0[1], self.p1[1], self.p2[1]];
 
     let cxmin = x0.min(x1).min(x2);
     let cxmax = x0.max(x1).max(x2);
@@ -110,43 +96,50 @@ impl QuadCurve {
   }
 
   pub fn max_x(&self) -> f32 {
-    self.p0.x.max(self.p1.x).max(self.p2.x)
+    self.p0[0].max(self.p1[0]).max(self.p2[0])
   }
 
   pub fn max_y(&self) -> f32 {
-    self.p0.y.max(self.p1.y).max(self.p2.y)
+    self.p0[1].max(self.p1[1]).max(self.p2[1])
   }
 }
 
-/// Extract glyph curves
+/// Extract glyph curves using ttf_parser::Face::outline_glyph
 struct SlugCurveExtractor<'a> {
   pub curves: &'a mut Vec<QuadCurve>,
-  pub start: Point2<f32>,
-  pub cur_location: Point2<f32>,
+  pub start: [f32; 2],
+  pub cur_location: [f32; 2],
 }
 
 impl<'a> SlugCurveExtractor<'a> {
+  /// Assign vec to which to append curves
   pub fn new(curves: &'a mut Vec<QuadCurve>) -> Self {
     Self {
       curves,
-      start: Point2 { x: 0.0, y: 0.0 },
-      cur_location: Point2 { x: 0.0, y: 0.0 },
+      start: [0.0, 0.0],
+      cur_location: [0.0, 0.0],
     }
   }
+}
+
+fn midpoint(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+  let x = a[0] + (b[0] - a[0]) / 2.0;
+  let y = a[1] + (b[1] - a[1]) / 2.0;
+  [x, y]
 }
 
 // see ttf_parser::OutlineBuilder
 impl<'a> ttf_parser::OutlineBuilder for SlugCurveExtractor<'a> {
   fn move_to(&mut self, x: f32, y: f32) {
-    self.start = Point2 { x, y };
+    self.start = [x, y];
     self.cur_location = self.start;
   }
 
   fn line_to(&mut self, x: f32, y: f32) {
-    let to = Point2 { x, y };
-    let diff = to - self.cur_location;
+    let to = [x, y];
+    let diff = [to[0] - self.cur_location[0], to[1] - self.cur_location[1]];
     // ignore vertical / horizontal lines
-    if diff.x.abs() > 0.1 || diff.y.abs() > 0.1 {
+    if diff[0].abs() > 0.1 || diff[1].abs() > 0.1 {
       self
         .curves
         .push(QuadCurve::line_to_quadratic(self.cur_location, to));
@@ -155,10 +148,10 @@ impl<'a> ttf_parser::OutlineBuilder for SlugCurveExtractor<'a> {
   }
 
   fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-    let to = Point2 { x, y };
+    let to = [x, y];
     self.curves.push(QuadCurve {
       p0: self.cur_location,
-      p1: Point2 { x: x1, y: y1 },
+      p1: [x1, y1],
       p2: to,
     });
     self.cur_location = to;
@@ -166,16 +159,16 @@ impl<'a> ttf_parser::OutlineBuilder for SlugCurveExtractor<'a> {
 
   fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
     let p0 = self.cur_location;
-    let p1 = Point2 { x: x1, y: y1 };
-    let p2 = Point2 { x: x2, y: y2 };
-    let p3 = Point2 { x, y };
+    let p1 = [x1, y1];
+    let p2 = [x2, y2];
+    let p3 = [x, y];
 
-    let m01 = p0.midpoint(p1);
-    let m12 = p1.midpoint(p2);
-    let m23 = p2.midpoint(p3);
-    let m012 = m01.midpoint(m12);
-    let m123 = m12.midpoint(m23);
-    let mid = m012.midpoint(m123);
+    let m01 = midpoint(p0, p1);
+    let m12 = midpoint(p1, p2);
+    let m23 = midpoint(p2, p3);
+    let m012 = midpoint(m01, m12);
+    let m123 = midpoint(m12, m23);
+    let mid = midpoint(m012, m123);
 
     self.curves.push(QuadCurve {
       p0,
@@ -192,9 +185,12 @@ impl<'a> ttf_parser::OutlineBuilder for SlugCurveExtractor<'a> {
   }
 
   fn close(&mut self) {
-    let full_vec = self.start - self.cur_location;
+    let full_vec = [
+      self.start[0] - self.cur_location[0],
+      self.start[1] - self.cur_location[1],
+    ];
     // ignore vertical / horizontal lines
-    if full_vec.x.abs() > 0.1 || full_vec.y.abs() > 0.1 {
+    if full_vec[0].abs() > 0.1 || full_vec[1].abs() > 0.1 {
       self
         .curves
         .push(QuadCurve::line_to_quadratic(self.cur_location, self.start));
@@ -209,8 +205,8 @@ fn build_glyph_bands(
   bounding_box: PointRect,
 ) -> [Vec<usize>; BAND_COUNT * 2] {
   let PointRect { min, max } = bounding_box;
-  let width = max.x - min.x;
-  let height = max.y - min.y;
+  let width = max[0] - min[0];
+  let height = max[1] - min[1];
 
   let mut bands: [Vec<usize>; BAND_COUNT * 2] = Default::default();
 
@@ -219,8 +215,8 @@ fn build_glyph_bands(
 
     // horizontal bands
     {
-      let b0 = (((cymin - min.y) / height) * BAND_COUNT as f32) as usize;
-      let b1 = (((cymax - min.y) / height) * BAND_COUNT as f32) as usize;
+      let b0 = (((cymin - min[1]) / height) * BAND_COUNT as f32) as usize;
+      let b1 = (((cymax - min[1]) / height) * BAND_COUNT as f32) as usize;
       #[allow(clippy::needless_range_loop)]
       for b in b0..=(b1.min(BAND_COUNT - 1)) {
         bands[b].push(c_i);
@@ -229,8 +225,8 @@ fn build_glyph_bands(
 
     // vertical bands
     {
-      let b0 = ((cxmin - min.x) / width * BAND_COUNT as f32) as usize;
-      let b1 = ((cxmax - min.x) / width * BAND_COUNT as f32) as usize;
+      let b0 = ((cxmin - min[0]) / width * BAND_COUNT as f32) as usize;
+      let b1 = ((cxmax - min[0]) / width * BAND_COUNT as f32) as usize;
       #[allow(clippy::needless_range_loop)]
       for b in b0..=(b1.min(BAND_COUNT - 1)) {
         bands[BAND_COUNT + b].push(c_i);
@@ -262,10 +258,16 @@ fn build_glyph_bands(
 pub const TEX_WIDTH: usize = 4096;
 
 #[derive(Debug, Clone)]
+/// Used to extract curves from glyphs and append them to the textures
+/// Holds the actual texture data
 pub struct SlugGlyphProcessor {
   glyph_curve_buffer: Vec<QuadCurve>,
 
+  /// Control point / curves texture
+  /// curve_tex_data.len() == TEX_WIDTH * curve_tex_height
   pub curve_tex_data: Vec<[f32; 4]>,
+  /// Band data texture
+  /// band_tex_data.len() == TEX_WIDTH * band_tex_height
   pub band_tex_data: Vec<[u32; 4]>,
 
   total_curve_texels: usize,
@@ -277,7 +279,16 @@ pub struct SlugGlyphProcessor {
   band_texel_i: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+/// Result of processing a glyph
+pub struct ProcessedGlyphData {
+  bounding_box: ttf_parser::Rect,
+  band_loc_x: u16,
+  band_loc_y: u16,
+}
+
 impl SlugGlyphProcessor {
+  /// Initialize an empty processor
   pub fn new() -> Self {
     Self {
       glyph_curve_buffer: Vec::new(),
@@ -355,12 +366,12 @@ impl SlugGlyphProcessor {
     for c in self.glyph_curve_buffer.iter() {
       // Texel 0: (p0x, p0y, p1x, p1y)
       let i0 = self.curve_texel_i;
-      self.curve_tex_data[i0] = [c.p0.x, c.p0.y, c.p1.x, c.p1.y];
+      self.curve_tex_data[i0] = [c.p0[0], c.p0[1], c.p1[0], c.p1[1]];
 
       // Texel 1: (p2x, p2y, 0, 0)
       let i1 = self.curve_texel_i + 1;
-      self.curve_tex_data[i1][0] = c.p2.x;
-      self.curve_tex_data[i1][1] = c.p2.y;
+      self.curve_tex_data[i1][0] = c.p2[0];
+      self.curve_tex_data[i1][1] = c.p2[1];
 
       self.curve_texel_i += 2;
     }
@@ -418,6 +429,12 @@ impl SlugGlyphProcessor {
     (band_loc_x as u16, band_loc_y.try_into().unwrap())
   }
 
+  /// Extract curves from a glyph using a font face and add them to the textures
+  ///
+  /// Note: this does not check if the glyph was already processed before, so adding duplicate
+  /// glyphs is possible
+  ///
+  /// Returns None if the glyph is empty (consists only of empty space)
   pub fn process_new_glyph(&mut self, face: &Face, glyph_id: u16) -> Option<ProcessedGlyphData> {
     self.glyph_curve_buffer.clear();
     let mut curve_extractor = SlugCurveExtractor::new(&mut self.glyph_curve_buffer);
@@ -432,14 +449,8 @@ impl SlugGlyphProcessor {
     };
 
     let point_bounding_box = PointRect {
-      min: Point2 {
-        x: bounding_box.x_min as f32,
-        y: bounding_box.y_min as f32,
-      },
-      max: Point2 {
-        x: bounding_box.x_max as f32,
-        y: bounding_box.y_max as f32,
-      },
+      min: [bounding_box.x_min as f32, bounding_box.y_min as f32],
+      max: [bounding_box.x_max as f32, bounding_box.y_max as f32],
     };
 
     let band_curve_indices = build_glyph_bands(&self.glyph_curve_buffer, point_bounding_box);
@@ -483,6 +494,7 @@ pub struct SlugVertexBandInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+/// Layout of a Slug Vertex as stated in the vertex shader
 pub struct SlugVertex {
   // pos
   pub obj_space_vertex_coords: [f32; 2],
@@ -551,437 +563,12 @@ impl SlugVertex {
   }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct SlugTextureData<'a> {
-  /// curve_tex_data.len() == TEX_WIDTH * self.curve_tex_height
-  pub curve_tex_data: &'a [[f32; 4]],
-  /// band_tex_data.len()  == TEX_WIDTH * self.band_tex_height
-  pub band_tex_data: &'a [[u32; 4]],
-  pub curve_tex_height: usize,
-  pub band_tex_height: usize,
-}
+#[cfg(test)]
+mod tests {
+  use super::*;
 
-impl<'a> SlugTextureData<'a> {
-  pub fn curve_tex_size(&self) -> u64 {
-    (self.curve_tex_data.len() * size_of::<[f32; 4]>()) as u64
-  }
-
-  pub fn band_tex_size(&self) -> u64 {
-    (self.band_tex_data.len() * size_of::<[u32; 4]>()) as u64
-  }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProcessedGlyphData {
-  bounding_box: ttf_parser::Rect,
-  band_loc_x: u16,
-  band_loc_y: u16,
-}
-
-pub struct SlugRendering<'a> {
-  text_buffer: Option<UnicodeBuffer>,
-  pub shaper: Shaper<'a>,
-  pub font_face: &'a Face<'a>,
-  font_ascender: f32,
-
-  processed_glyph_map: HashMap<u16, Option<ProcessedGlyphData>>,
-  glyph_processor: SlugGlyphProcessor,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct MultilineRect {
-  pub first_line: PointRect,
-  pub total: PointRect,
-}
-
-impl MultilineRect {
-  pub fn from_line_rects(rects: &[PointRect]) -> Self {
-    assert!(!rects.is_empty());
-    let first_line = rects[0];
-    let mut total = first_line;
-    for line in rects[1..].iter() {
-      total = total.or(*line);
-    }
-
-    Self { first_line, total }
-  }
-}
-
-pub struct TextBuildBounds {
-  // unscaled
-  pub offset: vk::Offset2D,
-  pub rect: PointRect,
-}
-
-impl<'a> SlugRendering<'a> {
-  // make sure font_ref and shaper_data target the same font and index
-  pub fn new(font_face: &'a Face<'a>, shaper: Shaper<'a>) -> Self {
-    let text_buffer = UnicodeBuffer::new();
-
-    // None for glyphs with no bounding box (like empty space)
-    let processed_glyph_map: HashMap<u16, Option<ProcessedGlyphData>> = HashMap::new();
-    let glyph_processor = SlugGlyphProcessor::new();
-
-    Self {
-      text_buffer: Some(text_buffer),
-      font_face,
-      font_ascender: font_face.ascender() as f32,
-      processed_glyph_map,
-      glyph_processor,
-      shaper,
-    }
-  }
-
-  // add glyphs to map and textures but not create vertices for them
-  pub fn add_glyphs_in_str(&mut self, text: &str) {
-    let mut text_buffer = self.text_buffer.take().unwrap();
-
-    text_buffer.push_str(text);
-
-    text_buffer.set_direction(harfrust::Direction::LeftToRight);
-
-    let glyph_buffer = self.shaper.shape(text_buffer, ShapeOptions::new());
-
-    // add new glyphs
-    for glyph_info in glyph_buffer.glyph_infos() {
-      let glyph_id = glyph_info.glyph_id.try_into().unwrap();
-      if self.processed_glyph_map.contains_key(&glyph_id) {
-        continue;
-      }
-
-      let processed_glyph = self
-        .glyph_processor
-        .process_new_glyph(self.font_face, glyph_id);
-      self.processed_glyph_map.insert(glyph_id, processed_glyph);
-    }
-
-    self.text_buffer = Some(glyph_buffer.clear());
-  }
-
-  pub fn get_bounding_box_from_char(&self, c: char) -> Option<ttf_parser::Rect> {
-    let glyph_id = self.font_face.glyph_index(c).unwrap();
-    let opt = self.processed_glyph_map.get(&glyph_id.0).unwrap();
-    opt.map(|data| data.bounding_box)
-  }
-
-  pub fn build_text(
-    &mut self,
-    text: &str,
-    font_size: usize,
-    // unscaled offset
-    offset: vk::Offset2D,
-    vertices: &mut Vec<SlugVertex>,
-    indices: &mut Vec<u32>,
-  ) -> TextBuildBounds {
-    let mut text_buffer = self.text_buffer.take().unwrap();
-
-    text_buffer.push_str(text);
-
-    text_buffer.set_direction(harfrust::Direction::LeftToRight);
-
-    let glyph_buffer = self.shaper.shape(text_buffer, ShapeOptions::new());
-    let scale = font_size as f32 / (self.shaper.units_per_em() as f32);
-
-    let mut cursor_x = offset.x;
-    let mut cursor_y = offset.y;
-    let mut quad_idx: u32 = (vertices.len() / VERTICES_PER_GLYPH) as u32;
-    let mut full_text_bounds = PointRect::REVERSED_INFINITY;
-    for (info, pos) in glyph_buffer
-      .glyph_infos()
-      .iter()
-      .zip(glyph_buffer.glyph_positions().iter())
-    {
-      let glyph_id = info.glyph_id as u16;
-      // None if glyph is empty space (has no bounding box)
-      let glyph_processed_opt = match self.processed_glyph_map.get(&glyph_id) {
-        Some(opt) => *opt,
-        None => {
-          // add new glyph to map
-          let processed_opt = self
-            .glyph_processor
-            .process_new_glyph(self.font_face, glyph_id);
-          self.processed_glyph_map.insert(glyph_id, processed_opt);
-          processed_opt
-        }
-      };
-      let glyph_processed_data = match glyph_processed_opt {
-        // full data
-        Some(values) => values,
-        None => {
-          // empty glyph -> skip
-          cursor_x += pos.x_advance;
-          cursor_y += pos.y_advance;
-          continue;
-        }
-      };
-
-      let bbox = glyph_processed_data.bounding_box;
-
-      let width = bbox.x_max - bbox.x_min;
-      let height = bbox.y_max - bbox.y_min;
-
-      // Object-space position (Y-up screen pixels)
-      let ox: i32 = cursor_x + pos.x_offset;
-      let oy = cursor_y + pos.y_offset;
-      let x0_unscaled = ox + bbox.x_min as i32;
-      let y0_unscaled = oy + bbox.y_min as i32;
-      let x1_unscaled = ox + bbox.x_max as i32;
-      let y1_unscaled = oy + bbox.y_max as i32;
-      let area = PointRect {
-        min: Point2 {
-          x: x0_unscaled as f32 * scale,
-          y: -y1_unscaled as f32 * scale,
-        },
-        max: Point2 {
-          x: x1_unscaled as f32 * scale,
-          y: -y0_unscaled as f32 * scale,
-        },
-      };
-      full_text_bounds = full_text_bounds.or(area);
-
-      // Band transform: maps em-space to band indices
-      let band_scale_x = if width > 0 {
-        BAND_COUNT as f32 / width as f32
-      } else {
-        0.0
-      };
-      let band_scale_y = if height > 0 {
-        BAND_COUNT as f32 / height as f32
-      } else {
-        0.0
-      };
-      let band_offset_x = -bbox.x_min as f32 * band_scale_x;
-      let band_offset_y = -bbox.y_min as f32 * band_scale_y;
-
-      let band_max_x = BAND_COUNT - 1;
-      let band_max_y = BAND_COUNT - 1;
-
-      let inv_scale = 1.0 / scale;
-
-      let corners = [
-        [
-          area.min.x,
-          area.max.y,
-          -1.0,
-          -1.0,
-          bbox.x_min as f32,
-          bbox.y_min as f32,
-        ], // bottom-left
-        [
-          area.max.x,
-          area.max.y,
-          1.0,
-          -1.0,
-          bbox.x_max as f32,
-          bbox.y_min as f32,
-        ], // bottom-right
-        [
-          area.max.x,
-          area.min.y,
-          1.0,
-          1.0,
-          bbox.x_max as f32,
-          bbox.y_max as f32,
-        ], // top-right
-        [
-          area.min.x,
-          area.min.y,
-          -1.0,
-          1.0,
-          bbox.x_min as f32,
-          bbox.y_max as f32,
-        ], // top-left
-      ];
-      for [px, py, nx, ny, ex, ey] in corners {
-        let vertex = SlugVertex {
-          // pos (location 0): object-space position + normal
-          obj_space_vertex_coords: [px, py],
-          obj_space_normal_vector: [nx, ny],
-
-          // tex (location 1): em-space coords + packed glyph/band data
-          em_space_sample_coords: [ex, ey],
-          // all this below could be instance data
-          glyph_in_band_loc: SlugVertexGlyphInBandLocation {
-            x: glyph_processed_data.band_loc_x,
-            y: glyph_processed_data.band_loc_y,
-          },
-          max_band_indices: SlugVertexMaxBandIndices {
-            max_band_x: band_max_x as u16,
-            max_band_y: band_max_y as u16,
-          },
-
-          // jac (location 2): inverse Jacobian (d(em)/d(obj))
-          jac: [inv_scale, 0.0, 0.0, inv_scale],
-          // bnd (location 3): band transform (scale + offset)
-          band: SlugVertexBandInfo {
-            scale_x: band_scale_x,
-            scale_y: band_scale_y,
-            offset_x: band_offset_x,
-            offset_y: band_offset_y,
-          },
-          color: [0.0, 0.0, 0.0, 1.0],
-        };
-        vertices.push(vertex);
-      }
-
-      let base = quad_idx * VERTICES_PER_GLYPH as u32;
-      indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-      cursor_x += pos.x_advance;
-      cursor_y += pos.y_advance;
-      quad_idx += 1;
-    }
-
-    self.text_buffer = Some(glyph_buffer.clear());
-
-    TextBuildBounds {
-      offset: vk::Offset2D {
-        x: cursor_x,
-        y: cursor_y,
-      },
-      rect: full_text_bounds,
-    }
-  }
-
-  /// Same as build_text but do not add vertices/indices
-  pub fn simulate_build_text(
-    &mut self,
-    text: &str,
-    font_size: usize,
-    // unscaled offset
-    offset: vk::Offset2D,
-  ) -> TextBuildBounds {
-    let mut text_buffer = self.text_buffer.take().unwrap();
-
-    text_buffer.push_str(text);
-
-    text_buffer.set_direction(harfrust::Direction::LeftToRight);
-
-    let glyph_buffer = self.shaper.shape(text_buffer, ShapeOptions::new());
-    let scale = font_size as f32 / (self.shaper.units_per_em() as f32);
-
-    let mut cursor_x = offset.x;
-    let mut cursor_y = offset.y;
-    let mut full_text_bounds = PointRect::REVERSED_INFINITY;
-    for (info, pos) in glyph_buffer
-      .glyph_infos()
-      .iter()
-      .zip(glyph_buffer.glyph_positions().iter())
-    {
-      let glyph_id = info.glyph_id as u16;
-      // None if glyph is empty space (has no bounding box)
-      let glyph_processed_opt = match self.processed_glyph_map.get(&glyph_id) {
-        Some(opt) => *opt,
-        None => {
-          // add new glyph to map
-          let processed_opt = self
-            .glyph_processor
-            .process_new_glyph(self.font_face, glyph_id);
-          self.processed_glyph_map.insert(glyph_id, processed_opt);
-          processed_opt
-        }
-      };
-      let glyph_processed_data = match glyph_processed_opt {
-        // full data
-        Some(values) => values,
-        None => {
-          // empty glyph -> skip
-          cursor_x += pos.x_advance;
-          cursor_y += pos.y_advance;
-          continue;
-        }
-      };
-
-      let bbox = glyph_processed_data.bounding_box;
-
-      // Object-space position (Y-up screen pixels)
-      let ox: i32 = cursor_x + pos.x_offset;
-      let oy = cursor_y + pos.y_offset;
-      let x0_unscaled = ox + bbox.x_min as i32;
-      let y0_unscaled = oy + bbox.y_min as i32;
-      let x1_unscaled = ox + bbox.x_max as i32;
-      let y1_unscaled = oy + bbox.y_max as i32;
-      let area = PointRect {
-        min: Point2 {
-          x: x0_unscaled as f32 * scale,
-          y: -y1_unscaled as f32 * scale,
-        },
-        max: Point2 {
-          x: x1_unscaled as f32 * scale,
-          y: -y0_unscaled as f32 * scale,
-        },
-      };
-      full_text_bounds = full_text_bounds.or(area);
-
-      cursor_x += pos.x_advance;
-      cursor_y += pos.y_advance;
-    }
-
-    self.text_buffer = Some(glyph_buffer.clear());
-
-    TextBuildBounds {
-      offset: vk::Offset2D {
-        x: cursor_x,
-        y: cursor_y,
-      },
-      rect: full_text_bounds,
-    }
-  }
-
-  pub fn get_line_dist(&self, mult: f32) -> i32 {
-    (self.font_ascender * mult) as i32
-  }
-
-  pub fn build_lines(
-    &mut self,
-    text: &[&str],
-    font_size: usize,
-    offset: vk::Offset2D,
-    line_distance_mult: f32,
-    vertices: &mut Vec<SlugVertex>,
-    indices: &mut Vec<u32>,
-  ) -> MultilineRect {
-    assert!(
-      !text.is_empty(),
-      "Slug build lines text must be at least one line"
-    );
-
-    let TextBuildBounds {
-      rect: first_rect, ..
-    } = self.build_text(text[0], font_size, offset, vertices, indices);
-    let line_distance = self.get_line_dist(line_distance_mult);
-
-    let mut total_rect = first_rect;
-    let mut line_offset = line_distance;
-    for &line in text[1..].iter() {
-      let TextBuildBounds {
-        rect: line_rect, ..
-      } = self.build_text(
-        line,
-        font_size,
-        vk::Offset2D {
-          x: offset.x,
-          y: offset.y - line_offset,
-        },
-        vertices,
-        indices,
-      );
-
-      line_offset += line_distance;
-      total_rect = total_rect.or(line_rect);
-    }
-
-    MultilineRect {
-      first_line: first_rect,
-      total: total_rect,
-    }
-  }
-
-  pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
-    SlugTextureData {
-      curve_tex_data: &self.glyph_processor.curve_tex_data,
-      band_tex_data: &self.glyph_processor.band_tex_data,
-      curve_tex_height: self.glyph_processor.curve_tex_height,
-      band_tex_height: self.glyph_processor.band_tex_height,
-    }
+  #[test]
+  fn it_works() {
+    todo!()
   }
 }
