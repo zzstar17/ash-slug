@@ -1,20 +1,68 @@
-use ash::vk;
+//! # Ash-slug
+//!
+//! Library dedicated to process text data for use in [Lengyel's Slug font rendering algorithm](https://github.com/EricLengyel/Slug)
+//! released shader implementations. It assists with populating vertex/index buffers and textures used in the shaders.
+//!
+//! Although this library was designed for use with [Ash](https://github.com/ash-rs/ash), a wrapper around Vulkan, the Ash bindings
+//! are actually optional and can be designed by disabling the "ash" feature (which is enabled by default). The text processing
+//! code is available for use in other Vulkan wrappers and graphics APIs.
+//!
+//! This library depends on [HarfRust](https://github.com/harfbuzz/harfrust) for text shaping and
+//! [ttf-parser](https://github.com/harfbuzz/ttf-parser) for parsing fonts.
+//!
+//! ## Vulkan shaders and changes
+//!
+//! The Vulkan version of shaders are available in [in this library's repository](https://github.com/zzstar17/ash-slug/blob/main/shaders).
+//! The initial version is also available [in the original reference implementation](https://github.com/EricLengyel/Slug).
+//!
+//! ## More information about the algorithm
+//!
+//! See <https://terathon.com/blog/decade-slug.html>
+//!
+//! ## Acknowledgements
+//!
+//! Thank you to diffusionstudio for [providing the initial inspiration for the library](https://github.com/diffusionstudio/slug-webgpu)
+//! and of course a big thank you to Eric Lengyel for creating the Slug algorithm and releasing it into the public domain.
+
 use std::{fmt::Debug, mem::offset_of, ptr};
 use ttf_parser::Face;
 
+#[cfg(feature = "ash")]
+use ash_lib::vk;
+
+/// Shaping and individual glyph storage
 pub mod slug_rendering;
 
+pub use slug_rendering::SlugRendering;
+
+/// Number of vertices generated for each processed glyph
 pub const VERTICES_PER_GLYPH: usize = 4;
+/// Number of indices generated for each processed glyph
 pub const INDICES_PER_GLYPH: usize = 6;
 
-// Band count is also hardcoded in the shader
-const BAND_COUNT: usize = 8;
+/// Width of the curve/band texture in texels/pixels
+pub const TEX_WIDTH: usize = 4096;
+
+/// Vulkan format of the curves / control point texture
+#[cfg(feature = "ash")]
+pub const CURVE_TEX_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
+/// Vulkan format of the band data texture
+#[cfg(feature = "ash")]
+pub const BAND_TEX_FORMAT: vk::Format = vk::Format::R32G32B32A32_UINT;
+
+/// R32G32B32A32_SFLOAT
+pub type CurveTexel = [f32; 4];
+/// R32G32B32A32_UINT
+pub type BandTexel = [u32; 4];
+
+/// Hardcoded in the shader
+pub const BAND_COUNT: usize = 8;
 
 const LINE_EPSILON: f32 = 0.125;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-/// Represents a Quadratic Bezier curve
+/// Represents a Quadratic Bezier Curve
 pub struct QuadCurve {
   pub p0: [f32; 2],
   pub p1: [f32; 2],
@@ -22,7 +70,7 @@ pub struct QuadCurve {
 }
 
 #[derive(Copy, Clone, Debug)]
-/// Rectangle area denominated by two points
+/// Rectangle area defined by two points
 pub struct PointRect {
   pub min: [f32; 2],
   pub max: [f32; 2],
@@ -255,36 +303,38 @@ fn build_glyph_bands(
   bands
 }
 
-pub const TEX_WIDTH: usize = 4096;
-
 #[derive(Debug, Clone)]
-/// Used to extract curves from glyphs and append them to the textures
+/// Extracts curves from glyphs and appends them to the textures
 /// Holds the actual texture data
 pub struct SlugGlyphProcessor {
   glyph_curve_buffer: Vec<QuadCurve>,
 
-  /// Control point / curves texture
-  /// curve_tex_data.len() == TEX_WIDTH * curve_tex_height
-  pub curve_tex_data: Vec<[f32; 4]>,
-  /// Band data texture
-  /// band_tex_data.len() == TEX_WIDTH * band_tex_height
-  pub band_tex_data: Vec<[u32; 4]>,
+  /// Control point / curves texture data
+  ///
+  /// Length will always be equal to TEX_WIDTH * curve_tex_height
+  pub curve_tex_data: Vec<CurveTexel>,
+  /// Band data texture data
+  ///
+  /// Length will always be equal to TEX_WIDTH * band_tex_height
+  pub band_tex_data: Vec<BandTexel>,
 
   total_curve_texels: usize,
+  /// Height of Control point / curves texture in texels/pixels
   pub curve_tex_height: usize,
   total_band_texels: usize,
+  /// Height of band data texture in texels/pixels
   pub band_tex_height: usize,
 
   curve_texel_i: usize,
   band_texel_i: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
 /// Result of processing a glyph
+#[derive(Debug, Clone, Copy)]
 pub struct ProcessedGlyphData {
-  bounding_box: ttf_parser::Rect,
-  band_loc_x: u16,
-  band_loc_y: u16,
+  pub bounding_box: ttf_parser::Rect,
+  pub band_loc_x: u16,
+  pub band_loc_y: u16,
 }
 
 impl SlugGlyphProcessor {
@@ -469,6 +519,7 @@ impl SlugGlyphProcessor {
   }
 }
 
+/// Location of glyph data in band texture
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SlugVertexGlyphInBandLocation {
@@ -476,6 +527,7 @@ pub struct SlugVertexGlyphInBandLocation {
   pub y: u16,
 }
 
+/// Max band indices (usually equal to BAND_COUNT - 1)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SlugVertexMaxBandIndices {
@@ -483,6 +535,7 @@ pub struct SlugVertexMaxBandIndices {
   pub max_band_y: u16,
 }
 
+/// Band scale and offset
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SlugVertexBandInfo {
@@ -492,27 +545,31 @@ pub struct SlugVertexBandInfo {
   pub offset_y: f32,
 }
 
+/// Layout of a Slug Vertex as stated in the vertex shader
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-/// Layout of a Slug Vertex as stated in the vertex shader
 pub struct SlugVertex {
-  // pos
+  /// Object-space vertex coordinates
   pub obj_space_vertex_coords: [f32; 2],
+  /// Object-space normal vector
   pub obj_space_normal_vector: [f32; 2],
 
-  // tex
+  /// Em-space sample coordinates
   pub em_space_sample_coords: [f32; 2],
+  /// Location of glyph data in band texture
   pub glyph_in_band_loc: SlugVertexGlyphInBandLocation,
+  /// Max band indices (usually equal to BAND_COUNT - 1)
   pub max_band_indices: SlugVertexMaxBandIndices,
 
-  // jac
+  /// Inverse Jacobian matrix entries (00, 01, 10, 11)
   pub jac: [f32; 4],
-  // bnd
+  /// Band scale and offset
   pub band: SlugVertexBandInfo,
-  // col
+  /// RGBA vertex color
   pub color: [f32; 4],
 }
 
+#[cfg(feature = "ash")]
 impl SlugVertex {
   const ATTRIBUTE_SIZE: usize = 5;
 
@@ -524,6 +581,7 @@ impl SlugVertex {
     }
   }
 
+  /// Get attribute descriptions as stated in the shader
   pub const fn get_attribute_descriptions(
     offset: u32,
     binding: u32,
@@ -560,6 +618,51 @@ impl SlugVertex {
         offset: offset_of!(Self, color) as u32,
       },
     ]
+  }
+}
+
+/// Vertex shader push constants / uniform buffer parameters
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct TextPushConstants {
+  // The four rows of the model view projection matrix
+  pub mvp_matrix: [[f32; 4]; 4],
+  /// Viewport dimensions in texels/pixels
+  pub viewport_dimensions: [f32; 4],
+}
+
+impl TextPushConstants {
+  /// Create using centered orthographic projection (y up pixel coords)
+  pub fn new_2d(
+    viewport_dimensions_width: f32,
+    viewport_dimensions_height: f32,
+    offset: [f32; 2],
+  ) -> Self {
+    let matrix = [
+      [
+        2.0 / viewport_dimensions_width,
+        0.0,
+        0.0,
+        offset[0] * 2.0 / viewport_dimensions_width - 1.0,
+      ],
+      [
+        0.0,
+        2.0 / viewport_dimensions_height,
+        0.0,
+        offset[1] * 2.0 / viewport_dimensions_height - 1.0,
+      ],
+      [0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 1.0],
+    ];
+    Self {
+      mvp_matrix: matrix,
+      viewport_dimensions: [
+        viewport_dimensions_width,
+        viewport_dimensions_height,
+        0.0,
+        0.0,
+      ],
+    }
   }
 }
 

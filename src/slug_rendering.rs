@@ -1,19 +1,24 @@
 use std::collections::HashMap;
 
-use ash::vk;
 use harfrust::{ShapeOptions, Shaper, UnicodeBuffer};
 use ttf_parser::Face;
+
+#[cfg(feature = "ash")]
+use ash_lib::vk;
 
 use crate::{
   BAND_COUNT, PointRect, ProcessedGlyphData, SlugGlyphProcessor, SlugVertex, SlugVertexBandInfo,
   SlugVertexGlyphInBandLocation, SlugVertexMaxBandIndices, VERTICES_PER_GLYPH,
 };
 
-#[derive(Clone, Copy, Debug)]
 pub struct SlugTextureData<'a> {
-  /// curve_tex_data.len() == TEX_WIDTH * curve_tex_height
+  /// Control point / curves texture data
+  ///
+  /// Length will always be equal to TEX_WIDTH * curve_tex_height
   pub curve_tex_data: &'a [[f32; 4]],
-  /// band_tex_data.len() == TEX_WIDTH * band_tex_height
+  /// Band data texture data
+  ///
+  /// Length will always be equal to TEX_WIDTH * band_tex_height
   pub band_tex_data: &'a [[u32; 4]],
   pub curve_tex_height: usize,
   pub band_tex_height: usize,
@@ -40,8 +45,8 @@ pub struct SlugRendering<'a> {
   glyph_processor: SlugGlyphProcessor,
 }
 
-#[derive(Clone, Copy, Debug)]
 /// Result of a text processing
+#[derive(Clone, Copy, Debug)]
 pub struct TextBuildResult {
   /// Unscaled final offset at the end of the text
   pub offset: vk::Offset2D,
@@ -104,17 +109,12 @@ impl<'a> SlugRendering<'a> {
     self.text_buffer = Some(glyph_buffer.clear());
   }
 
-  pub fn get_bounding_box_from_char(&self, c: char) -> Option<ttf_parser::Rect> {
-    let glyph_id = self.font_face.glyph_index(c).unwrap();
-    let opt = self.processed_glyph_map.get(&glyph_id.0).unwrap();
-    opt.map(|data| data.bounding_box)
-  }
-
+  /// Shape text, process new glyphs and append text glyph data to vertices and indexes
   pub fn build_text(
     &mut self,
     text: &str,
     font_size: usize,
-    // unscaled offset
+    // em scale
     offset: vk::Offset2D,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
@@ -454,6 +454,7 @@ impl<'a> SlugRendering<'a> {
     }
   }
 
+  /// Get a reference to the entire texture data
   pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
     SlugTextureData {
       curve_tex_data: &self.glyph_processor.curve_tex_data,
