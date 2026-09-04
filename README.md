@@ -114,4 +114,4 @@ Expect breaking changes between minor versions.
 ## Acknowledgements
 
 Thank you to diffusionstudio for [providing the initial inspiration for the library](https://github.com/diffusionstudio/slug-webgpu)
-and of course a big thank you to Eric Lengyel for creating the Slug algorithm and releasing it into the public domain.
+and, of course, a big thank you to Eric Lengyel for creating the Slug algorithm and releasing it into the public domain.
