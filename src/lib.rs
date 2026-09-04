@@ -1,34 +1,121 @@
 //! # Ash-slug
 //!
 //! Library dedicated to process text data for use in [Lengyel's Slug font rendering algorithm](https://github.com/EricLengyel/Slug)
-//! released shader implementations. It assists with populating vertex/index buffers and textures used in the shaders.
+//! shader implementations. It assists with populating vertex/index buffers and textures used in the shaders.
 //!
-//! Although this library was designed for use with [Ash](https://github.com/ash-rs/ash), a wrapper around Vulkan, the Ash bindings
-//! are actually optional and can be designed by disabling the "ash" feature (which is enabled by default). The text processing
+//! Although this library was designed for use with [Ash](https://github.com/ash-rs/ash) (a wrapper around Vulkan), the Ash bindings
+//! are actually optional and are included only with the "ash" feature (which is enabled by default). The text processing
 //! code is available for use in other Vulkan wrappers and graphics APIs.
 //!
 //! This library depends on [HarfRust](https://github.com/harfbuzz/harfrust) for text shaping and
 //! [ttf-parser](https://github.com/harfbuzz/ttf-parser) for parsing fonts.
+//!
+//! ## Example
+//!
+//! ```
+//! use ash_slug::{SlugRendering, SlugVertex};
+//! # use ash_lib::vk;
+//! #
+//! # use font_kit::{
+//! #     family_name::FamilyName, handle::Handle, properties::Properties, source::SystemSource,
+//! # };
+//! # pub fn load_font() -> (Box<[u8]>, u32) {
+//! #     let handle = SystemSource::new()
+//! #         .select_best_match(&[FamilyName::SansSerif], &Properties::new())
+//! #         .expect("Failed to select font");
+//! #
+//! #     let (font_path, font_index) = match handle {
+//! #         Handle::Path { path, font_index } => (path, font_index),
+//! #         Handle::Memory { .. } => panic!(),
+//! #     };
+//! #
+//! #     let font_bytes = std::fs::read(font_path)
+//! #         .expect("Failed to read font file")
+//! #         .into_boxed_slice();
+//! #
+//! #     (font_bytes, font_index)
+//! # }
+//!
+//! // use font-kit (https://github.com/servo/font-kit) or any other library
+//! // capable of finding system fonts.
+//! // otherwise, read a font file manually
+//! //
+//! // font_index corresponds to the font index in a font collection, 0 otherwise
+//! let (font_bytes, font_index) = load_font();
+//!
+//! let font_ref: harfrust::FontRef = harfrust::FontRef::from_index(&font_bytes, font_index)
+//!     .expect("Failed to read font data");
+//! let shaper_data: harfrust::ShaperData = harfrust::ShaperData::new(&font_ref);
+//!
+//! let font_face: ttf_parser::Face = ttf_parser::Face::parse(&font_bytes, font_index)
+//!     .expect("Failed to parse font face from font data");
+//!
+//! let shaper = shaper_data.shaper(&font_ref).build();
+//! let mut slug = SlugRendering::new(&font_face, shaper);
+//!
+//! // add number glyphs to the beginning of the textures
+//! slug.add_glyphs_in_str("0123456789");
+//!
+//! let mut vertices: Vec<SlugVertex> = Vec::new();
+//! let mut indices: Vec<u32> = Vec::new();
+//!
+//! let font_size = 18;
+//!
+//! // a different offset is provided for non ash use
+//! let build_result = slug.build_text(
+//!     "hello, ",
+//!     font_size,
+//!     vk::Offset2D::default(),
+//!     &mut vertices,
+//!     &mut indices,
+//! );
+//! // write "world!" to the right
+//! slug.build_text(
+//!     "world!",
+//!     font_size,
+//!     build_result.end_offset,
+//!     &mut vertices,
+//!     &mut indices,
+//! );
+//!
+//! // write multiple lines
+//! let _multiline_result = slug.build_lines(
+//!     &["Welcome", "to", "font", "rendering"],
+//!     font_size,
+//!     vk::Offset2D { x: 0, y: slug.get_line_dist(1.5) * -2},
+//!     1.5, // line distance (depending on font ascender)
+//!     &mut vertices,
+//!     &mut indices,
+//! );
+//!
+//! let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default());
+//! assert!(!simulate_result.new_glyphs);
+//!
+//! // unicode support depends on the font, unknown glyphs will be replaced by fonts "Notdef" symbol
+//! slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), &mut vertices, &mut indices);
+//!
+//! let textures = slug.get_texture_data();
+//! // copy the data to your graphics API buffers in any way you see fit
+//! // ptr::copy_nonoverlapping(
+//! //     textures.curve_tex_data.as_ptr() as *const u8,
+//! //     staging_buffer_ptr.as_ptr(),
+//! //     textures.curve_tex_size() as usize,
+//! // );
+//! ```
 //!
 //! ## Vulkan shaders and changes
 //!
 //! The Vulkan version of shaders are available in [in this library's repository](https://github.com/zzstar17/ash-slug/blob/main/shaders).
 //! The initial version is also available [in the original reference implementation](https://github.com/EricLengyel/Slug).
 //!
-//! ## More information about the algorithm
-//!
-//! See <https://terathon.com/blog/decade-slug.html>
-//!
-//! ## Acknowledgements
-//!
-//! Thank you to diffusionstudio for [providing the initial inspiration for the library](https://github.com/diffusionstudio/slug-webgpu)
-//! and of course a big thank you to Eric Lengyel for creating the Slug algorithm and releasing it into the public domain.
 
-use std::{fmt::Debug, mem::offset_of, ptr};
+use std::{fmt::Debug, ptr};
 use ttf_parser::Face;
 
 #[cfg(feature = "ash")]
 use ash_lib::vk;
+#[cfg(feature = "ash")]
+use std::mem::offset_of;
 
 /// Shaping and individual glyph storage
 pub mod slug_rendering;
@@ -60,8 +147,16 @@ pub const BAND_COUNT: usize = 8;
 
 const LINE_EPSILON: f32 = 0.125;
 
+#[cfg(not(feature = "ash"))]
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Offset2D {
+  pub x: i32,
+  pub y: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
 /// Represents a Quadratic Bezier Curve
 pub struct QuadCurve {
   pub p0: [f32; 2],
@@ -69,7 +164,7 @@ pub struct QuadCurve {
   pub p2: [f32; 2],
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 /// Rectangle area defined by two points
 pub struct PointRect {
   pub min: [f32; 2],
@@ -90,7 +185,7 @@ impl PointRect {
     self.max[1] - self.min[1]
   }
 
-  /// Return PointRect that includes both
+  /// Get PointRect that contains both rectangle areas.
   pub fn or(self, other: PointRect) -> Self {
     Self {
       min: [self.min[0].min(other.min[0]), self.min[1].min(other.min[1])],
@@ -98,6 +193,7 @@ impl PointRect {
     }
   }
 
+  #[cfg(feature = "ash")]
   pub fn into_vk_extent(self) -> vk::Extent2D {
     vk::Extent2D {
       width: self.width() as u32,
@@ -624,14 +720,14 @@ impl SlugVertex {
 /// Vertex shader push constants / uniform buffer parameters
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TextPushConstants {
+pub struct SlugPushConstants {
   // The four rows of the model view projection matrix
   pub mvp_matrix: [[f32; 4]; 4],
   /// Viewport dimensions in texels/pixels
   pub viewport_dimensions: [f32; 4],
 }
 
-impl TextPushConstants {
+impl SlugPushConstants {
   /// Create using centered orthographic projection (y up pixel coords)
   pub fn new_2d(
     viewport_dimensions_width: f32,
@@ -668,10 +764,256 @@ impl TextPushConstants {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  use std::sync::LazyLock;
+
+  #[cfg(not(feature = "ash"))]
+  use crate::Offset2D;
+  #[cfg(feature = "ash")]
+  use ash_lib::vk::Offset2D;
+  use font_kit::{
+    family_name::FamilyName, handle::Handle, properties::Properties, source::SystemSource,
+  };
+
+  use crate::{SlugRendering, slug_rendering::TextBuildResult};
+
+  const FONT_SIZE: usize = 30;
+
+  pub static FONT_BYTES: LazyLock<FontBytes> = LazyLock::new(|| load_font());
+  pub static FONT_REF: LazyLock<harfrust::FontRef> = LazyLock::new(|| {
+    harfrust::FontRef::from_index(&FONT_BYTES.bytes, FONT_BYTES.font_index)
+      .expect("Failed to read font data")
+  });
+  pub static SHAPER_DATA: LazyLock<harfrust::ShaperData> =
+    LazyLock::new(|| harfrust::ShaperData::new(&FONT_REF));
+  pub static FONT_FACE: LazyLock<ttf_parser::Face> = LazyLock::new(|| {
+    ttf_parser::Face::parse(&FONT_BYTES.bytes, FONT_BYTES.font_index)
+      .expect("Failed to parse font face from font data")
+  });
+
+  pub struct FontBytes {
+    pub bytes: Box<[u8]>,
+    pub font_index: u32,
+  }
+
+  pub fn load_font() -> FontBytes {
+    let handle = SystemSource::new()
+      .select_best_match(&[FamilyName::SansSerif], &Properties::new())
+      .expect("Failed to select font");
+
+    let (font_path, font_index) = match handle {
+      Handle::Path { path, font_index } => (path, font_index),
+      Handle::Memory { .. } => panic!(),
+    };
+
+    let font_bytes = std::fs::read(font_path)
+      .expect("Failed to read font file")
+      .into_boxed_slice();
+
+    FontBytes {
+      bytes: font_bytes,
+      font_index,
+    }
+  }
+
+  fn assert_result_is_nonzero(result: TextBuildResult) {
+    assert!(result.rect.width() > 0.0);
+    assert!(result.rect.height() > 0.0);
+    assert!(result.end_offset.x > 0);
+  }
 
   #[test]
-  fn it_works() {
-    todo!()
+  fn single_glyph() {
+    let shaper = SHAPER_DATA.shaper(&FONT_REF).build();
+    let mut slug = SlugRendering::new(&FONT_FACE, shaper);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    let result = slug.build_text(
+      "a",
+      FONT_SIZE,
+      Offset2D::default(),
+      &mut vertices,
+      &mut indices,
+    );
+    assert_result_is_nonzero(result);
+    assert!(result.new_glyphs);
+
+    assert_eq!(vertices.len(), crate::VERTICES_PER_GLYPH);
+    assert_eq!(indices.len(), crate::INDICES_PER_GLYPH);
+  }
+
+  #[test]
+  fn glyphs_stored() {
+    let shaper = SHAPER_DATA.shaper(&FONT_REF).build();
+    let mut slug = SlugRendering::new(&FONT_FACE, shaper);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    slug.add_glyphs_in_str("testing");
+
+    let result = slug.build_text(
+      "test",
+      FONT_SIZE,
+      Offset2D::default(),
+      &mut vertices,
+      &mut indices,
+    );
+    assert_result_is_nonzero(result);
+    assert!(!result.new_glyphs);
+
+    let result = slug.build_text(
+      ".",
+      FONT_SIZE,
+      Offset2D::default(),
+      &mut vertices,
+      &mut indices,
+    );
+    assert_result_is_nonzero(result);
+    assert!(result.new_glyphs);
+
+    assert!(!vertices.is_empty());
+    assert!(!indices.is_empty());
+  }
+
+  #[test]
+  fn simulate() {
+    let shaper = SHAPER_DATA.shaper(&FONT_REF).build();
+    let mut slug = SlugRendering::new(&FONT_FACE, shaper);
+
+    slug.add_glyphs_in_str("h̶̫̞̭̪̭̮̲̱̟̼͔̳͐̍̇̔̕é̵̡̞͓̤̞͉͔͙̭̞̪̩̝̬ĺ̶͎̗͖̹̳̮̺͕͇͖̩͍͖̏̓̾̈͘l̶̨̹̝̯͕̠̥͔͖̆͜ơ̷̢̤̮̱̤̩̰͍̞͉̳̮̭͕͎͋̌͌̔̓̚ world!");
+
+    let result = slug.simulate_build_text("world", FONT_SIZE, Offset2D::default());
+    assert_result_is_nonzero(result);
+    assert!(!result.new_glyphs);
+  }
+
+  #[test]
+  fn multiline_shaping() {
+    let shaper = SHAPER_DATA.shaper(&FONT_REF).build();
+    let mut slug = SlugRendering::new(&FONT_FACE, shaper);
+
+    slug.add_glyphs_in_str("o world");
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    let result = slug.build_lines(
+      &["hello", "world!"],
+      FONT_SIZE,
+      Offset2D { x: 0, y: 0 },
+      1.5,
+      &mut vertices,
+      &mut indices,
+    );
+
+    assert!(result.first_line_rect.width() > 0.0);
+    assert!(result.first_line_rect.height() > 0.0);
+    assert_result_is_nonzero(result.total);
+    assert!(result.total.new_glyphs);
+
+    assert!(result.first_line_rect.height() < result.total.rect.height());
+
+    assert!(!vertices.is_empty());
+    assert!(!indices.is_empty());
+  }
+
+  #[test]
+  fn main_example_test() {
+    use crate::{SlugRendering, SlugVertex};
+
+    use font_kit::{
+      family_name::FamilyName, handle::Handle, properties::Properties, source::SystemSource,
+    };
+    pub fn load_font() -> (Box<[u8]>, u32) {
+      let handle = SystemSource::new()
+        .select_best_match(&[FamilyName::SansSerif], &Properties::new())
+        .expect("Failed to select font");
+
+      let (font_path, font_index) = match handle {
+        Handle::Path { path, font_index } => (path, font_index),
+        Handle::Memory { .. } => panic!(),
+      };
+
+      let font_bytes = std::fs::read(font_path)
+        .expect("Failed to read font file")
+        .into_boxed_slice();
+
+      (font_bytes, font_index)
+    }
+
+    // use font-kit (https://github.com/servo/font-kit) or any other library capable of finding system fonts
+    // otherwise, read a font file manually
+    //
+    // font_index corresponds to the font index in a font collection, 0 otherwise
+    let (font_bytes, font_index) = load_font();
+
+    let font_ref: harfrust::FontRef =
+      harfrust::FontRef::from_index(&font_bytes, font_index).expect("Failed to read font data");
+    let shaper_data: harfrust::ShaperData = harfrust::ShaperData::new(&font_ref);
+
+    let font_face: ttf_parser::Face = ttf_parser::Face::parse(&font_bytes, font_index)
+      .expect("Failed to parse font face from font data");
+
+    let shaper = shaper_data.shaper(&font_ref).build();
+    let mut slug = SlugRendering::new(&font_face, shaper);
+
+    // add number glyphs to the beginning of the textures
+    slug.add_glyphs_in_str("0123456789");
+
+    let mut vertices: Vec<SlugVertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    let font_size = 18;
+
+    // a different offset is provided for non ash use
+    let build_result = slug.build_text(
+      "hello, ",
+      font_size,
+      Offset2D::default(),
+      &mut vertices,
+      &mut indices,
+    );
+    // write "world!" to the right
+    slug.build_text(
+      "world!",
+      font_size,
+      build_result.end_offset,
+      &mut vertices,
+      &mut indices,
+    );
+
+    // write multiple lines
+    let _multiline_result = slug.build_lines(
+      &["Welcome", "to", "font", "rendering"],
+      font_size,
+      Offset2D {
+        x: 0,
+        y: slug.get_line_dist(1.5) * -2,
+      },
+      1.5, // line distance (depending on font ascender)
+      &mut vertices,
+      &mut indices,
+    );
+
+    let simulate_result = slug.simulate_build_text("17", font_size, Offset2D::default());
+    assert!(!simulate_result.new_glyphs);
+
+    // unicode support depends on the font, unknown glyphs will be replaced by fonts "Notdef" symbol
+    slug.build_text(
+      "c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚",
+      font_size,
+      Offset2D::default(),
+      &mut vertices,
+      &mut indices,
+    );
+
+    let _textures = slug.get_texture_data();
+    // copy the data to your graphics API buffers in any way you see fit
+    // ptr::copy_nonoverlapping(
+    //     textures.curve_tex_data.as_ptr() as *const u8,
+    //     staging_buffer_ptr.as_ptr(),
+    //     textures.curve_tex_size() as usize,
+    // );
   }
 }

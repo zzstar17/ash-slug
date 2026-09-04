@@ -3,14 +3,17 @@ use std::collections::HashMap;
 use harfrust::{ShapeOptions, Shaper, UnicodeBuffer};
 use ttf_parser::Face;
 
+#[cfg(not(feature = "ash"))]
+use crate::Offset2D;
 #[cfg(feature = "ash")]
-use ash_lib::vk;
+use ash_lib::vk::Offset2D;
 
 use crate::{
   BAND_COUNT, PointRect, ProcessedGlyphData, SlugGlyphProcessor, SlugVertex, SlugVertexBandInfo,
   SlugVertexGlyphInBandLocation, SlugVertexMaxBandIndices, VERTICES_PER_GLYPH,
 };
 
+/// Reference to the Curves / Band texture data
 pub struct SlugTextureData<'a> {
   /// Control point / curves texture data
   ///
@@ -45,17 +48,18 @@ pub struct SlugRendering<'a> {
   glyph_processor: SlugGlyphProcessor,
 }
 
-/// Result of a text processing
+/// Result of text processing
 #[derive(Clone, Copy, Debug)]
 pub struct TextBuildResult {
   /// Unscaled final offset at the end of the text
-  pub offset: vk::Offset2D,
+  pub end_offset: Offset2D,
   /// Dimensions and position of the text
   pub rect: PointRect,
   /// True if the operation required updating textures with new glyphs
   pub new_glyphs: bool,
 }
 
+/// Result of multiline text processing
 #[derive(Clone, Copy, Debug)]
 pub struct MultilineBuildResult {
   // Dimensions and position of the first line
@@ -64,7 +68,9 @@ pub struct MultilineBuildResult {
 }
 
 impl<'a> SlugRendering<'a> {
-  /// Note: make sure font_face and shaper target the same font (and index, if font is a collection)
+  /// Creates a new empty SlugRendering for a specific font.
+  ///
+  /// Note: make sure font_face and shaper target the same font (and index, if the font file is a collection).
   pub fn new(font_face: &'a Face<'a>, shaper: Shaper<'a>) -> Self {
     let text_buffer = UnicodeBuffer::new();
 
@@ -82,8 +88,8 @@ impl<'a> SlugRendering<'a> {
     }
   }
 
-  // Process glyphs in the passed string and adds them to the HashMap / textures,
-  /// without returning vertices / indices for the text
+  /// Process glyphs in the passed string and adds them to the HashMap / textures,
+  /// without returning vertices / indices for the text.
   pub fn add_glyphs_in_str(&mut self, text: &str) {
     let mut text_buffer = self.text_buffer.take().unwrap();
 
@@ -109,13 +115,16 @@ impl<'a> SlugRendering<'a> {
     self.text_buffer = Some(glyph_buffer.clear());
   }
 
-  /// Shape text, process new glyphs and append text glyph data to vertices and indexes
+  /// Shape text, process new glyphs and append text glyph data to vertices and indexes.
+  ///
+  /// Note: Index numbers depend on vertices length. This is so new indices point directly to new vertices,
+  /// without the use of vertex offsets.
   pub fn build_text(
     &mut self,
     text: &str,
     font_size: usize,
     // em scale
-    offset: vk::Offset2D,
+    offset: Offset2D,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
   ) -> TextBuildResult {
@@ -278,7 +287,7 @@ impl<'a> SlugRendering<'a> {
     self.text_buffer = Some(glyph_buffer.clear());
 
     TextBuildResult {
-      offset: vk::Offset2D {
+      end_offset: Offset2D {
         x: cursor_x,
         y: cursor_y,
       },
@@ -287,13 +296,15 @@ impl<'a> SlugRendering<'a> {
     }
   }
 
-  /// Same as build_text but do not add vertices/indices
+  /// Same as build_text but do not add vertices/indices.
+  ///
+  /// Note: This still process and adds new glyphs to the HashMap.
   pub fn simulate_build_text(
     &mut self,
     text: &str,
     font_size: usize,
     // unscaled offset
-    offset: vk::Offset2D,
+    offset: Offset2D,
   ) -> TextBuildResult {
     let mut text_buffer = self.text_buffer.take().unwrap();
 
@@ -362,7 +373,7 @@ impl<'a> SlugRendering<'a> {
     self.text_buffer = Some(glyph_buffer.clear());
 
     TextBuildResult {
-      offset: vk::Offset2D {
+      end_offset: Offset2D {
         x: cursor_x,
         y: cursor_y,
       },
@@ -375,14 +386,14 @@ impl<'a> SlugRendering<'a> {
     (self.font_ascender * mult) as i32
   }
 
-  /// Perform build_text on multiple lines
+  /// Perform build_text on multiple lines.
   ///
-  /// Returns PointRect::REVERSED_INFINITY if no lines are specified
+  /// Returns PointRect::REVERSED_INFINITY if no lines are specified.
   pub fn build_lines(
     &mut self,
     text: &[&str],
     font_size: usize,
-    offset: vk::Offset2D,
+    offset: Offset2D,
     line_distance_mult: f32,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
@@ -393,7 +404,7 @@ impl<'a> SlugRendering<'a> {
       return MultilineBuildResult {
         first_line_rect: PointRect::REVERSED_INFINITY,
         total: TextBuildResult {
-          offset,
+          end_offset: offset,
           rect: PointRect::REVERSED_INFINITY,
           new_glyphs: false,
         },
@@ -402,12 +413,12 @@ impl<'a> SlugRendering<'a> {
 
     let TextBuildResult {
       rect: first_line_rect,
-      offset: first_offset,
+      end_offset: first_offset,
       new_glyphs: first_new_glyphs,
     } = self.build_text(
       text[0],
       font_size,
-      vk::Offset2D {
+      Offset2D {
         x: offset.x,
         y: offset.y,
       },
@@ -423,12 +434,12 @@ impl<'a> SlugRendering<'a> {
     for &line in text[1..].iter() {
       let TextBuildResult {
         rect: line_rect,
-        offset: new_offset,
+        end_offset: new_offset,
         new_glyphs: cur_new_glyphs,
       } = self.build_text(
         line,
         font_size,
-        vk::Offset2D {
+        Offset2D {
           x: offset.x,
           y: offset.y - line_offset,
         },
@@ -447,14 +458,14 @@ impl<'a> SlugRendering<'a> {
     MultilineBuildResult {
       first_line_rect,
       total: TextBuildResult {
-        offset: last_offset,
+        end_offset: last_offset,
         rect: total_rect,
         new_glyphs,
       },
     }
   }
 
-  /// Get a reference to the entire texture data
+  /// Get a reference to texture data.
   pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
     SlugTextureData {
       curve_tex_data: &self.glyph_processor.curve_tex_data,

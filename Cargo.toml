@@ -1,6 +1,6 @@
 [package]
 name = "ash-slug"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["zstar17 <zzstari17@gmail.com>"]
 edition = "2024"
 description = "Text data processing and organization for shader implementations of Eric Lengyel's Slug algorithm for resolution-independent vector font rendering on the GPU"
@@ -16,6 +16,9 @@ exclude = ["vulkan_shaders/"]
 ash_lib = { version = "0.38.0", optional = true, package = "ash" }
 harfrust = "0.13.3"
 ttf-parser = "0.25.1"
+
+[dev-dependencies]
+font-kit = "0.14.3"
 
 [features]
 "default" = ["ash"]
