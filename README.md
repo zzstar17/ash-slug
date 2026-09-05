@@ -1,5 +1,9 @@
 # Ash-slug
 
+[![Crates.io Version](https://img.shields.io/crates/v/ash-slug.svg)](https://crates.io/crates/ash-slug)
+[![Documentation](https://docs.rs/ash-slug/badge.svg)](https://docs.rs/ash-slug)
+[![LICENSE](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
+
 Library dedicated to process text data for use in [Lengyel's Slug font rendering algorithm](https://github.com/EricLengyel/Slug)
 shader implementations. It assists with populating vertex/index buffers and textures used in the shaders.
 
@@ -107,9 +111,7 @@ See https://terathon.com/blog/decade-slug.html, https://github.com/EricLengyel/S
 
 ## Contributing
 
-Feel free to open new issues / pull requests for any features that you want to request.
-
-Expect breaking changes between minor versions.
+Feel free to open new issues / pull requests for any features that you may want to request.
 
 ## Acknowledgements
 
