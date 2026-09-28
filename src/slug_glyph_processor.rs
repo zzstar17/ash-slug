@@ -157,7 +157,7 @@ fn build_glyph_bands(
 
 #[derive(Debug, Clone)]
 /// Extracts curves from glyphs and appends them to the textures
-/// 
+///
 /// Holds the actual texture data
 pub struct SlugGlyphProcessor {
   glyph_curve_buffer: Vec<QuadCurve>,
@@ -188,6 +188,12 @@ pub struct ProcessedGlyphData {
   pub bounding_box: ttf_parser::Rect,
   pub band_loc_x: u16,
   pub band_loc_y: u16,
+}
+
+impl Default for SlugGlyphProcessor {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl SlugGlyphProcessor {

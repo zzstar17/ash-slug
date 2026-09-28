@@ -1,6 +1,6 @@
 [package]
 name = "ash-slug"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["zstar17 <zzstari17@gmail.com>"]
 edition = "2024"
 description = "Text data processing and organization for shader implementations of Eric Lengyel's Slug algorithm for resolution-independent vector font rendering on the GPU"
