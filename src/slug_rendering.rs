@@ -542,8 +542,8 @@ impl<'a> SlugRendering<'a> {
       font_size,
       offset,
       line_distance_mult,
-      vertex_offset,
       center_text,
+      vertex_offset,
       vertices,
       indices,
     )
@@ -558,8 +558,8 @@ impl<'a> SlugRendering<'a> {
     font_size: usize,
     offset: Offset2D,
     line_distance_mult: f32,
-    vertex_offset: u32,
     center_text: bool,
+    vertex_offset: u32,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
   ) -> MultilineBuildResult {
