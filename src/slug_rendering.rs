@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use harfrust::{ShapeOptions, Shaper, UnicodeBuffer};
+use harfrust::{GlyphBuffer, ShapeOptions, Shaper, UnicodeBuffer};
 use ttf_parser::Face;
 
 #[cfg(not(feature = "ash"))]
@@ -9,8 +9,8 @@ use crate::Offset2D;
 use ash_lib::vk::Offset2D;
 
 use crate::{
-  BAND_COUNT, PointRect, ProcessedGlyphData, SlugGlyphProcessor, SlugVertex, SlugVertexBandInfo,
-  SlugVertexGlyphInBandLocation, SlugVertexMaxBandIndices, VERTICES_PER_GLYPH,
+  BAND_COUNT, INDICES_PER_GLYPH, PointRect, ProcessedGlyphData, SlugGlyphProcessor, SlugVertex,
+  SlugVertexBandInfo, SlugVertexGlyphInBandLocation, SlugVertexMaxBandIndices, VERTICES_PER_GLYPH,
 };
 
 /// Reference to the Curves / Band texture data
@@ -29,11 +29,11 @@ pub struct SlugTextureData<'a> {
 
 impl<'a> SlugTextureData<'a> {
   pub fn curve_tex_size(&self) -> u64 {
-    (self.curve_tex_data.len() * size_of::<[f32; 4]>()) as u64
+    std::mem::size_of_val(self.curve_tex_data) as u64
   }
 
   pub fn band_tex_size(&self) -> u64 {
-    (self.band_tex_data.len() * size_of::<[u32; 4]>()) as u64
+    std::mem::size_of_val(self.band_tex_data) as u64
   }
 }
 
@@ -57,6 +57,29 @@ pub struct TextBuildResult {
   pub rect: PointRect,
   /// True if the operation required updating textures with new glyphs
   pub new_glyphs: bool,
+  /// Index of the first vertex added in this block
+  pub new_vertex_offset: u32,
+  /// Index of the first index added in this block
+  pub new_index_offset: u32,
+  /// Length of the new added vertices block
+  pub new_vertex_count: u32,
+  /// Length of the new added indices block
+  pub new_index_count: u32,
+}
+
+/// Result of text processing
+#[derive(Clone, Copy, Debug)]
+pub struct SimulateTextBuildResult {
+  /// Unscaled final offset at the end of the text
+  pub end_offset: Offset2D,
+  /// Dimensions and position of the text
+  pub rect: PointRect,
+  /// True if the operation required updating textures with new glyphs
+  pub new_glyphs: bool,
+  /// Length of the new added vertices block
+  pub new_vertex_count: u32,
+  /// Length of the new added indices block
+  pub new_index_count: u32,
 }
 
 /// Result of multiline text processing
@@ -88,8 +111,20 @@ impl<'a> SlugRendering<'a> {
     }
   }
 
+  /// Get a reference to texture data.
+  pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
+    SlugTextureData {
+      curve_tex_data: &self.glyph_processor.curve_tex_data,
+      band_tex_data: &self.glyph_processor.band_tex_data,
+      curve_tex_height: self.glyph_processor.curve_tex_height,
+      band_tex_height: self.glyph_processor.band_tex_height,
+    }
+  }
+
   /// Process glyphs in the passed string and adds them to the HashMap / textures,
   /// without returning vertices / indices for the text.
+  ///
+  /// Useful if you want to make sure the glyphs exist in the textures for later use.
   pub fn add_glyphs_in_str(&mut self, text: &str) {
     let mut text_buffer = self.text_buffer.take().unwrap();
 
@@ -115,16 +150,75 @@ impl<'a> SlugRendering<'a> {
     self.text_buffer = Some(glyph_buffer.clear());
   }
 
+  fn get_glyph_buffer_text_horizontal_size(buffer: &GlyphBuffer) -> i32 {
+    let mut cur = 0;
+    let mut min = 0;
+    let mut max = 0;
+    for pos in buffer.glyph_positions().iter() {
+      cur += pos.x_advance;
+      let cur_pos = cur + pos.x_offset;
+      if cur_pos < min {
+        min = cur_pos;
+      }
+      if cur_pos > max {
+        max = cur_pos;
+      }
+    }
+
+    max - min
+  }
+
   /// Shape text, process new glyphs and append text glyph data to vertices and indexes.
   ///
-  /// Note: Index numbers depend on vertices length. This is so new indices point directly to new vertices,
-  /// without the use of vertex offsets.
+  /// `font_size` and `offset` are set in the font's em scale.
+  ///
+  /// `center_text` centers text horizontally by applying an additional negative offset equal to
+  /// half of the text horizontal size.
+  ///
+  /// By default, indices point to vertices in increasing order depending on what is already in the
+  /// vertices array. This makes it possible to render multiple text blocks in one draw call but will
+  /// require you to always bind the whole vertex buffer.
+  ///
+  /// See [Self::build_text_with_offset] in case you want to apply your own vertex offsets.
   pub fn build_text(
     &mut self,
     text: &str,
     font_size: usize,
     // em scale
     offset: Offset2D,
+    center_text: bool,
+    vertices: &mut Vec<SlugVertex>,
+    indices: &mut Vec<u32>,
+  ) -> TextBuildResult {
+    let vertex_offset = vertices.len() as u32;
+    self.build_text_with_offset(
+      text,
+      font_size,
+      offset,
+      center_text,
+      vertex_offset,
+      vertices,
+      indices,
+    )
+  }
+
+  /// Perform [Self::build_text] with an additional vertex offset.
+  ///
+  /// `vertex_offset` sets what vertex do indices start pointing to.
+  ///
+  /// Using this may require setting the appropriate offsets in
+  /// [vkCmdBindVertexBuffers](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindVertexBuffers.html)
+  /// or when issuing drawing commands.
+  ///
+  /// [Self::build_text] sets this value to `vertices.len()`
+  pub fn build_text_with_offset(
+    &mut self,
+    text: &str,
+    font_size: usize,
+    // em scale
+    offset: Offset2D,
+    center_text: bool,
+    vertex_offset: u32,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
   ) -> TextBuildResult {
@@ -137,11 +231,22 @@ impl<'a> SlugRendering<'a> {
     let glyph_buffer = self.shaper.shape(text_buffer, ShapeOptions::new());
     let scale = font_size as f32 / (self.shaper.units_per_em() as f32);
 
+    let new_vertex_offset = vertices.len() as u32;
+    let new_index_offset = indices.len() as u32;
+    let mut new_vertex_count = 0;
+    let mut new_index_count = 0;
+
     let mut new_glyphs = false;
     let mut cursor_x = offset.x;
     let mut cursor_y = offset.y;
-    let mut quad_idx: u32 = (vertices.len() / VERTICES_PER_GLYPH) as u32;
+    let mut vertex_offset: u32 = vertex_offset;
     let mut full_text_bounds = PointRect::REVERSED_INFINITY;
+
+    if center_text {
+      let horizontal_size = Self::get_glyph_buffer_text_horizontal_size(&glyph_buffer);
+      cursor_x -= horizontal_size / 2;
+    }
+
     for (info, pos) in glyph_buffer
       .glyph_infos()
       .iter()
@@ -276,12 +381,16 @@ impl<'a> SlugRendering<'a> {
         };
         vertices.push(vertex);
       }
+      new_vertex_count += corners.len() as u32;
 
-      let base = quad_idx * VERTICES_PER_GLYPH as u32;
-      indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+      let base = vertex_offset;
+      let new_indices = [base, base + 1, base + 2, base, base + 2, base + 3];
+      indices.extend_from_slice(&new_indices);
+      new_index_count += new_indices.len() as u32;
+
       cursor_x += pos.x_advance;
       cursor_y += pos.y_advance;
-      quad_idx += 1;
+      vertex_offset += VERTICES_PER_GLYPH as u32;
     }
 
     self.text_buffer = Some(glyph_buffer.clear());
@@ -293,6 +402,10 @@ impl<'a> SlugRendering<'a> {
       },
       rect: full_text_bounds,
       new_glyphs,
+      new_vertex_offset,
+      new_index_offset,
+      new_vertex_count,
+      new_index_count,
     }
   }
 
@@ -303,9 +416,10 @@ impl<'a> SlugRendering<'a> {
     &mut self,
     text: &str,
     font_size: usize,
-    // unscaled offset
+    // em scale
     offset: Offset2D,
-  ) -> TextBuildResult {
+    center_text: bool,
+  ) -> SimulateTextBuildResult {
     let mut text_buffer = self.text_buffer.take().unwrap();
 
     text_buffer.push_str(text);
@@ -315,10 +429,19 @@ impl<'a> SlugRendering<'a> {
     let glyph_buffer = self.shaper.shape(text_buffer, ShapeOptions::new());
     let scale = font_size as f32 / (self.shaper.units_per_em() as f32);
 
+    let mut new_vertex_count = 0;
+    let mut new_index_count = 0;
+
     let mut new_glyphs = false;
     let mut cursor_x = offset.x;
     let mut cursor_y = offset.y;
     let mut full_text_bounds = PointRect::REVERSED_INFINITY;
+
+    if center_text {
+      let horizontal_size = Self::get_glyph_buffer_text_horizontal_size(&glyph_buffer);
+      cursor_x -= horizontal_size / 2;
+    }
+
     for (info, pos) in glyph_buffer
       .glyph_infos()
       .iter()
@@ -366,39 +489,86 @@ impl<'a> SlugRendering<'a> {
       };
       full_text_bounds = full_text_bounds.or(area);
 
+      new_vertex_count += VERTICES_PER_GLYPH as u32;
+      new_index_count += INDICES_PER_GLYPH as u32;
+
       cursor_x += pos.x_advance;
       cursor_y += pos.y_advance;
     }
 
     self.text_buffer = Some(glyph_buffer.clear());
 
-    TextBuildResult {
+    SimulateTextBuildResult {
       end_offset: Offset2D {
         x: cursor_x,
         y: cursor_y,
       },
       rect: full_text_bounds,
       new_glyphs,
+      new_vertex_count,
+      new_index_count,
     }
   }
 
+  /// Get font ascender times a multipler
   pub fn get_line_dist(&self, mult: f32) -> i32 {
     (self.font_ascender * mult) as i32
   }
 
-  /// Perform build_text on multiple lines.
+  /// Perform [Self::build_text] on multiple lines.
   ///
-  /// Returns PointRect::REVERSED_INFINITY if no lines are specified.
+  /// Line distance will depend on the font's ascender value times the provided
+  /// `line_distance_mult`.
+  ///
+  /// All lines will be added as one block, meaning that the indices will point to
+  /// all the line's vertices as if they were in the same group.
+  ///
+  /// Returns [PointRect::REVERSED_INFINITY] if no lines are specified.
+  ///
+  /// See [Self::build_text] for more details.
   pub fn build_lines(
     &mut self,
     text: &[&str],
     font_size: usize,
     offset: Offset2D,
     line_distance_mult: f32,
+    center_text: bool,
+    vertices: &mut Vec<SlugVertex>,
+    indices: &mut Vec<u32>,
+  ) -> MultilineBuildResult {
+    let vertex_offset = vertices.len() as u32;
+    self.build_lines_with_offset(
+      text,
+      font_size,
+      offset,
+      line_distance_mult,
+      center_text,
+      vertex_offset,
+      vertices,
+      indices,
+    )
+  }
+
+  /// Perform [Self::build_lines] with an additional vertex offset.
+  ///
+  /// See [Self::build_text_with_offset] for more information.
+  pub fn build_lines_with_offset(
+    &mut self,
+    text: &[&str],
+    font_size: usize,
+    offset: Offset2D,
+    line_distance_mult: f32,
+    center_text: bool,
+    vertex_offset: u32,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
   ) -> MultilineBuildResult {
     let line_distance = self.get_line_dist(line_distance_mult);
+
+    let new_vertex_offset = vertices.len() as u32;
+    let new_index_offset = indices.len() as u32;
+    let mut total_vertex_count = 0;
+    let mut total_index_count = 0;
 
     if text.is_empty() {
       return MultilineBuildResult {
@@ -407,6 +577,10 @@ impl<'a> SlugRendering<'a> {
           end_offset: offset,
           rect: PointRect::REVERSED_INFINITY,
           new_glyphs: false,
+          new_vertex_offset,
+          new_index_offset,
+          new_vertex_count: 0,
+          new_index_count: 0,
         },
       };
     }
@@ -415,16 +589,23 @@ impl<'a> SlugRendering<'a> {
       rect: first_line_rect,
       end_offset: first_offset,
       new_glyphs: first_new_glyphs,
-    } = self.build_text(
+      new_vertex_count,
+      new_index_count,
+      ..
+    } = self.build_text_with_offset(
       text[0],
       font_size,
       Offset2D {
         x: offset.x,
         y: offset.y,
       },
+      center_text,
+      vertex_offset,
       vertices,
       indices,
     );
+    total_vertex_count += new_vertex_count;
+    total_index_count += new_index_count;
 
     let mut line_offset = line_distance;
     let mut total_rect = first_line_rect;
@@ -436,13 +617,18 @@ impl<'a> SlugRendering<'a> {
         rect: line_rect,
         end_offset: new_offset,
         new_glyphs: cur_new_glyphs,
-      } = self.build_text(
+        new_vertex_count,
+        new_index_count,
+        ..
+      } = self.build_text_with_offset(
         line,
         font_size,
         Offset2D {
           x: offset.x,
           y: offset.y - line_offset,
         },
+        center_text,
+        vertex_offset,
         vertices,
         indices,
       );
@@ -453,6 +639,8 @@ impl<'a> SlugRendering<'a> {
       if cur_new_glyphs {
         new_glyphs = true;
       }
+      total_vertex_count += new_vertex_count;
+      total_index_count += new_index_count;
     }
 
     MultilineBuildResult {
@@ -461,17 +649,11 @@ impl<'a> SlugRendering<'a> {
         end_offset: last_offset,
         rect: total_rect,
         new_glyphs,
+        new_vertex_offset,
+        new_index_offset,
+        new_vertex_count: total_vertex_count,
+        new_index_count: total_index_count,
       },
-    }
-  }
-
-  /// Get a reference to texture data.
-  pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
-    SlugTextureData {
-      curve_tex_data: &self.glyph_processor.curve_tex_data,
-      band_tex_data: &self.glyph_processor.band_tex_data,
-      curve_tex_height: self.glyph_processor.curve_tex_height,
-      band_tex_height: self.glyph_processor.band_tex_height,
     }
   }
 }

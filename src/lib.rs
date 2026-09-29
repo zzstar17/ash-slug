@@ -66,6 +66,7 @@
 //!     "hello, ",
 //!     font_size,
 //!     vk::Offset2D::default(),
+//!     false,
 //!     &mut vertices,
 //!     &mut indices,
 //! );
@@ -74,6 +75,7 @@
 //!     "world!",
 //!     font_size,
 //!     build_result.end_offset,
+//!     false,
 //!     &mut vertices,
 //!     &mut indices,
 //! );
@@ -84,15 +86,16 @@
 //!     font_size,
 //!     vk::Offset2D { x: 0, y: slug.get_line_dist(1.5) * -2},
 //!     1.5, // line distance (depending on font ascender)
+//!     false,
 //!     &mut vertices,
 //!     &mut indices,
 //! );
 //!
-//! let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default());
+//! let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default(), false);
 //! assert!(!simulate_result.new_glyphs);
 //!
 //! // unicode support depends on the font, unknown glyphs will be replaced by fonts "Notdef" symbol
-//! slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), &mut vertices, &mut indices);
+//! slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), false, &mut vertices, &mut indices);
 //!
 //! let textures = slug.get_texture_data();
 //! // copy the data to your graphics API buffers in any way you see fit
@@ -352,46 +355,65 @@ impl SlugVertex {
 }
 
 /// Vertex shader push constants / uniform buffer parameters
+///
+/// Note that the Model View Projection matrix must be written in a row-major form in accordance with the HLSL shaders.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SlugPushConstants {
   // The four rows of the model view projection matrix
   pub mvp_matrix: [[f32; 4]; 4],
   /// Viewport dimensions in texels/pixels
-  pub viewport_dimensions: [f32; 4],
+  pub viewport_dimensions: [f32; 2],
 }
 
 impl SlugPushConstants {
-  /// Create using centered orthographic projection (y up pixel coords)
-  pub fn new_2d(
-    viewport_dimensions_width: f32,
-    viewport_dimensions_height: f32,
-    offset: [f32; 2],
-  ) -> Self {
+  /// Create new push constants from a row-major Model-View-Projection matrix and the viewport dimensions.
+  pub fn new(mvp_matrix: [[f32; 4]; 4], viewport_dimensions: [f32; 2]) -> Self {
+    Self {
+      mvp_matrix,
+      viewport_dimensions,
+    }
+  }
+
+  /// Create new push constants by manually transposing a column-major MVP matrix into row-major form.
+  pub fn new_column_major(mvp_matrix: [[f32; 4]; 4], viewport_dimensions: [f32; 2]) -> Self {
+    let m = mvp_matrix;
+    let row_major = [
+      [m[0][0], m[1][0], m[2][0], m[3][0]],
+      [m[0][1], m[1][1], m[2][1], m[3][1]],
+      [m[0][2], m[1][2], m[2][2], m[3][2]],
+      [m[0][3], m[1][3], m[2][3], m[3][3]],
+    ];
+
+    Self {
+      mvp_matrix: row_major,
+      viewport_dimensions,
+    }
+  }
+
+  /// Create using centered orthographic projection (y up pixel coords).
+  ///
+  /// Useful when rendering 2D UI.
+  pub fn new_2d(viewport_dimensions: [f32; 2], offset: [f32; 2]) -> Self {
     let matrix = [
       [
-        2.0 / viewport_dimensions_width,
+        2.0 / viewport_dimensions[0],
         0.0,
         0.0,
-        offset[0] * 2.0 / viewport_dimensions_width - 1.0,
+        offset[0] * 2.0 / viewport_dimensions[0] - 1.0,
       ],
       [
         0.0,
-        2.0 / viewport_dimensions_height,
+        2.0 / viewport_dimensions[1],
         0.0,
-        offset[1] * 2.0 / viewport_dimensions_height - 1.0,
+        offset[1] * 2.0 / viewport_dimensions[1] - 1.0,
       ],
       [0.0, 0.0, 0.0, 0.0],
       [0.0, 0.0, 0.0, 1.0],
     ];
     Self {
       mvp_matrix: matrix,
-      viewport_dimensions: [
-        viewport_dimensions_width,
-        viewport_dimensions_height,
-        0.0,
-        0.0,
-      ],
+      viewport_dimensions,
     }
   }
 }
@@ -408,7 +430,10 @@ mod tests {
     family_name::FamilyName, handle::Handle, properties::Properties, source::SystemSource,
   };
 
-  use crate::{SlugRendering, slug_rendering::TextBuildResult};
+  use crate::{
+    SlugRendering,
+    slug_rendering::{SimulateTextBuildResult, TextBuildResult},
+  };
 
   const FONT_SIZE: usize = 30;
 
@@ -455,6 +480,12 @@ mod tests {
     assert!(result.end_offset.x > 0);
   }
 
+  fn assert_sim_result_is_nonzero(result: SimulateTextBuildResult) {
+    assert!(result.rect.width() > 0.0);
+    assert!(result.rect.height() > 0.0);
+    assert!(result.end_offset.x > 0);
+  }
+
   #[test]
   fn single_glyph() {
     let shaper = SHAPER_DATA.shaper(&FONT_REF).build();
@@ -467,6 +498,7 @@ mod tests {
       "a",
       FONT_SIZE,
       Offset2D::default(),
+      false,
       &mut vertices,
       &mut indices,
     );
@@ -475,6 +507,8 @@ mod tests {
 
     assert_eq!(vertices.len(), crate::VERTICES_PER_GLYPH);
     assert_eq!(indices.len(), crate::INDICES_PER_GLYPH);
+    assert_eq!(result.new_vertex_count, crate::VERTICES_PER_GLYPH as u32);
+    assert_eq!(result.new_index_count, crate::INDICES_PER_GLYPH as u32);
   }
 
   #[test]
@@ -490,6 +524,7 @@ mod tests {
       "test",
       FONT_SIZE,
       Offset2D::default(),
+      false,
       &mut vertices,
       &mut indices,
     );
@@ -500,6 +535,7 @@ mod tests {
       ".",
       FONT_SIZE,
       Offset2D::default(),
+      false,
       &mut vertices,
       &mut indices,
     );
@@ -517,8 +553,8 @@ mod tests {
 
     slug.add_glyphs_in_str("h̶̫̞̭̪̭̮̲̱̟̼͔̳͐̍̇̔̕é̵̡̞͓̤̞͉͔͙̭̞̪̩̝̬ĺ̶͎̗͖̹̳̮̺͕͇͖̩͍͖̏̓̾̈͘l̶̨̹̝̯͕̠̥͔͖̆͜ơ̷̢̤̮̱̤̩̰͍̞͉̳̮̭͕͎͋̌͌̔̓̚ world!");
 
-    let result = slug.simulate_build_text("world", FONT_SIZE, Offset2D::default());
-    assert_result_is_nonzero(result);
+    let result = slug.simulate_build_text("world", FONT_SIZE, Offset2D::default(), true);
+    assert_sim_result_is_nonzero(result);
     assert!(!result.new_glyphs);
   }
 
@@ -537,6 +573,7 @@ mod tests {
       FONT_SIZE,
       Offset2D { x: 0, y: 0 },
       1.5,
+      false,
       &mut vertices,
       &mut indices,
     );
@@ -605,6 +642,7 @@ mod tests {
       "hello, ",
       font_size,
       Offset2D::default(),
+      false,
       &mut vertices,
       &mut indices,
     );
@@ -613,6 +651,7 @@ mod tests {
       "world!",
       font_size,
       build_result.end_offset,
+      false,
       &mut vertices,
       &mut indices,
     );
@@ -626,11 +665,12 @@ mod tests {
         y: slug.get_line_dist(1.5) * -2,
       },
       1.5, // line distance (depending on font ascender)
+      true,
       &mut vertices,
       &mut indices,
     );
 
-    let simulate_result = slug.simulate_build_text("17", font_size, Offset2D::default());
+    let simulate_result = slug.simulate_build_text("17", font_size, Offset2D::default(), false);
     assert!(!simulate_result.new_glyphs);
 
     // unicode support depends on the font, unknown glyphs will be replaced by fonts "Notdef" symbol
@@ -638,6 +678,7 @@ mod tests {
       "c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚",
       font_size,
       Offset2D::default(),
+      false,
       &mut vertices,
       &mut indices,
     );

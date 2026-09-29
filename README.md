@@ -48,6 +48,7 @@ let build_result = slug.build_text(
     "hello, ",
     font_size,
     vk::Offset2D::default(),
+    false,
     &mut vertices,
     &mut indices,
 );
@@ -56,6 +57,7 @@ slug.build_text(
     "world!",
     font_size,
     build_result.end_offset,
+    false,
     &mut vertices,
     &mut indices,
 );
@@ -66,15 +68,16 @@ let _multiline_result = slug.build_lines(
     font_size,
     vk::Offset2D { x: 0, y: slug.get_line_dist(1.5) * -2},
     1.5, // line distance (depending on font ascender)
+    false,
     &mut vertices,
     &mut indices,
 );
 
-let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default());
+let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default(), false,);
 assert!(!simulate_result.new_glyphs);
 
 // unicode support depends on the font, unknown glyphs will be replaced by fonts "Notdef" symbol
-slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), &mut vertices, &mut indices);
+slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), false, &mut vertices, &mut indices);
 
 let textures = slug.get_texture_data();
 // copy the data to your graphics API buffers in any way you see fit
@@ -94,6 +97,7 @@ Vertex shader changes:
 
 - Changed `cbuffer ParamStruct` to Vulkan Push Constants `[[vk::push_constant]] PushConstants pc`, as well as all variables
   that mention it.
+- Changed `slug_viewport` in `PushConstants` (previously `ParamStruct`) to be of the form `float2` instead of `float4`.
 
 Pixel / fragment shader changes:
 

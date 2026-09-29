@@ -65,7 +65,7 @@ float2 SlugDilate(float4 pos, float4 tex, float4 jac, float4 m0, float4 m1, floa
 struct PushConstants
 {
 	float4 slug_matrix[4];							// The four rows of the MVP matrix.
-	float4 slug_viewport;							// The viewport dimensions, in pixels.
+	float2 slug_viewport;							// The viewport dimensions, in pixels.
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -85,7 +85,7 @@ VertexStruct main(float4 attrib[5] : ATTRIB, uint vid : SV_VertexID)
 
 	// Apply dynamic dilation to vertex position. Returns new em-space sample position.
 
-	vresult.texcoord = SlugDilate(attrib[0], attrib[1], attrib[2], pc.slug_matrix[0], pc.slug_matrix[1], pc.slug_matrix[3], pc.slug_viewport.xy, p);
+	vresult.texcoord = SlugDilate(attrib[0], attrib[1], attrib[2], pc.slug_matrix[0], pc.slug_matrix[1], pc.slug_matrix[3], pc.slug_viewport, p);
 
 	// Apply MVP matrix to dilated vertex position.
 
