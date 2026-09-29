@@ -8,7 +8,7 @@ Library dedicated to process text data for use in [Lengyel's Slug font rendering
 shader implementations. It assists with populating vertex/index buffers and textures used in the shaders.
 
 Although this library was designed for use with [Ash](https://github.com/ash-rs/ash) (a wrapper around Vulkan), the Ash bindings
-are actually optional and are included only with the "ash" feature (which is enabled by default). The text processing
+are optional and are included only with the "ash" feature (which is enabled by default). The text processing
 code is available for use in other Vulkan wrappers and graphics APIs.
 
 This library depends on [HarfRust](https://github.com/harfbuzz/harfrust) for text shaping and [ttf-parser](https://github.com/harfbuzz/ttf-parser)
