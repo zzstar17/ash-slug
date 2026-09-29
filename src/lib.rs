@@ -66,6 +66,7 @@
 //!     "hello, ",
 //!     font_size,
 //!     vk::Offset2D::default(),
+//!     false,
 //!     &mut vertices,
 //!     &mut indices,
 //! );
@@ -74,6 +75,7 @@
 //!     "world!",
 //!     font_size,
 //!     build_result.end_offset,
+//!     false,
 //!     &mut vertices,
 //!     &mut indices,
 //! );
@@ -84,15 +86,16 @@
 //!     font_size,
 //!     vk::Offset2D { x: 0, y: slug.get_line_dist(1.5) * -2},
 //!     1.5, // line distance (depending on font ascender)
+//!     false,
 //!     &mut vertices,
 //!     &mut indices,
 //! );
 //!
-//! let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default());
+//! let simulate_result = slug.simulate_build_text("17", font_size, vk::Offset2D::default(), false);
 //! assert!(!simulate_result.new_glyphs);
 //!
 //! // unicode support depends on the font, unknown glyphs will be replaced by fonts "Notdef" symbol
-//! slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), &mut vertices, &mut indices);
+//! slug.build_text("c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚", font_size, vk::Offset2D::default(), false, &mut vertices, &mut indices);
 //!
 //! let textures = slug.get_texture_data();
 //! // copy the data to your graphics API buffers in any way you see fit
@@ -364,7 +367,7 @@ pub struct SlugPushConstants {
 }
 
 impl SlugPushConstants {
-  /// Create new push constants from a row-major Model-View-Projection matrix and the viewport dimensions
+  /// Create new push constants from a row-major Model-View-Projection matrix and the viewport dimensions.
   pub fn new(mvp_matrix: [[f32; 4]; 4], viewport_dimensions: [f32; 2]) -> Self {
     Self {
       mvp_matrix,
@@ -372,7 +375,7 @@ impl SlugPushConstants {
     }
   }
 
-  /// Create new push constants by manually transposing a column-major MVP matrix into row-major form
+  /// Create new push constants by manually transposing a column-major MVP matrix into row-major form.
   pub fn new_column_major(mvp_matrix: [[f32; 4]; 4], viewport_dimensions: [f32; 2]) -> Self {
     let m = mvp_matrix;
     let row_major = [
@@ -388,7 +391,7 @@ impl SlugPushConstants {
     }
   }
 
-  /// Create using centered orthographic projection (y up pixel coords)
+  /// Create using centered orthographic projection (y up pixel coords).
   ///
   /// Useful when rendering 2D UI.
   pub fn new_2d(viewport_dimensions: [f32; 2], offset: [f32; 2]) -> Self {
@@ -495,7 +498,6 @@ mod tests {
       "a",
       FONT_SIZE,
       Offset2D::default(),
-      0,
       false,
       &mut vertices,
       &mut indices,
@@ -522,7 +524,6 @@ mod tests {
       "test",
       FONT_SIZE,
       Offset2D::default(),
-      vertices.len() as u32,
       false,
       &mut vertices,
       &mut indices,
@@ -534,7 +535,6 @@ mod tests {
       ".",
       FONT_SIZE,
       Offset2D::default(),
-      vertices.len() as u32,
       false,
       &mut vertices,
       &mut indices,
@@ -573,7 +573,6 @@ mod tests {
       FONT_SIZE,
       Offset2D { x: 0, y: 0 },
       1.5,
-      0,
       false,
       &mut vertices,
       &mut indices,
@@ -643,7 +642,6 @@ mod tests {
       "hello, ",
       font_size,
       Offset2D::default(),
-      0,
       false,
       &mut vertices,
       &mut indices,
@@ -653,7 +651,6 @@ mod tests {
       "world!",
       font_size,
       build_result.end_offset,
-      build_result.new_vertex_count,
       false,
       &mut vertices,
       &mut indices,
@@ -668,7 +665,6 @@ mod tests {
         y: slug.get_line_dist(1.5) * -2,
       },
       1.5, // line distance (depending on font ascender)
-      0,
       true,
       &mut vertices,
       &mut indices,
@@ -682,7 +678,6 @@ mod tests {
       "c̷̦̮̀r̸̡̩̲̒a̵̪̺̼̾̆͝z̴̛̘̜y̸̢͖̌̌,  魚",
       font_size,
       Offset2D::default(),
-      0,
       false,
       &mut vertices,
       &mut indices,

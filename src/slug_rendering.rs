@@ -111,6 +111,16 @@ impl<'a> SlugRendering<'a> {
     }
   }
 
+  /// Get a reference to texture data.
+  pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
+    SlugTextureData {
+      curve_tex_data: &self.glyph_processor.curve_tex_data,
+      band_tex_data: &self.glyph_processor.band_tex_data,
+      curve_tex_height: self.glyph_processor.curve_tex_height,
+      band_tex_height: self.glyph_processor.band_tex_height,
+    }
+  }
+
   /// Process glyphs in the passed string and adds them to the HashMap / textures,
   /// without returning vertices / indices for the text.
   ///
@@ -160,26 +170,55 @@ impl<'a> SlugRendering<'a> {
 
   /// Shape text, process new glyphs and append text glyph data to vertices and indexes.
   ///
-  /// `font_size` and `offset`` are set in the font's em scale.
-  ///
-  /// `vertex_offset` sets what vertex do indices start pointing to. Useful when binding different regions
-  /// of the vertex/index buffer and using offsets in vkCmdDrawIndexed.
+  /// `font_size` and `offset` are set in the font's em scale.
   ///
   /// `center_text` centers text horizontally by applying an additional negative offset equal to
   /// half of the text horizontal size.
   ///
-  /// You can call this function multiple times while keeping text in the same "block"
-  /// (rendered in one draw call using one Model-View-Projection matrix) by
-  /// setting `vertex_offset` to `vertices.len()` and manually changing `offset` using line distance or offsets from
-  /// previous build text function calls.
+  /// By default, indices point to vertices in increasing order depending on what is already in the
+  /// vertices array. This makes it possible to render multiple text blocks in one draw call but will
+  /// require you to always bind the whole vertex buffer.
+  ///
+  /// See [Self::build_text_with_offset] in case you want to apply your own vertex offsets.
   pub fn build_text(
     &mut self,
     text: &str,
     font_size: usize,
     // em scale
     offset: Offset2D,
-    vertex_offset: u32,
     center_text: bool,
+    vertices: &mut Vec<SlugVertex>,
+    indices: &mut Vec<u32>,
+  ) -> TextBuildResult {
+    let vertex_offset = vertices.len() as u32;
+    self.build_text_with_offset(
+      text,
+      font_size,
+      offset,
+      center_text,
+      vertex_offset,
+      vertices,
+      indices,
+    )
+  }
+
+  /// Perform [Self::build_text] with an additional vertex offset.
+  ///
+  /// `vertex_offset` sets what vertex do indices start pointing to.
+  ///
+  /// Using this may require setting the appropriate offsets in
+  /// [vkCmdBindVertexBuffers](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBindVertexBuffers.html)
+  /// or when issuing drawing commands.
+  ///
+  /// [Self::build_text] sets this value to `vertices.len()`
+  pub fn build_text_with_offset(
+    &mut self,
+    text: &str,
+    font_size: usize,
+    // em scale
+    offset: Offset2D,
+    center_text: bool,
+    vertex_offset: u32,
     vertices: &mut Vec<SlugVertex>,
     indices: &mut Vec<u32>,
   ) -> TextBuildResult {
@@ -471,18 +510,49 @@ impl<'a> SlugRendering<'a> {
     }
   }
 
+  /// Get font ascender times a multipler
   pub fn get_line_dist(&self, mult: f32) -> i32 {
     (self.font_ascender * mult) as i32
   }
 
-  // todo: write more multiline explanation
-  /// Perform build_text on multiple lines.
+  /// Perform [Self::build_text] on multiple lines.
+  ///
+  /// Line distance will depend on the font's ascender value times the provided
+  /// `line_distance_mult`.
   ///
   /// All lines will be added as one block, meaning that the indices will point to
   /// all the line's vertices as if they were in the same group.
   ///
-  /// Returns PointRect::REVERSED_INFINITY if no lines are specified.
+  /// Returns [PointRect::REVERSED_INFINITY] if no lines are specified.
+  ///
+  /// See [Self::build_text] for more details.
   pub fn build_lines(
+    &mut self,
+    text: &[&str],
+    font_size: usize,
+    offset: Offset2D,
+    line_distance_mult: f32,
+    center_text: bool,
+    vertices: &mut Vec<SlugVertex>,
+    indices: &mut Vec<u32>,
+  ) -> MultilineBuildResult {
+    let vertex_offset = vertices.len() as u32;
+    self.build_lines_with_offset(
+      text,
+      font_size,
+      offset,
+      line_distance_mult,
+      vertex_offset,
+      center_text,
+      vertices,
+      indices,
+    )
+  }
+
+  /// Perform [Self::build_lines] with an additional vertex offset.
+  ///
+  /// See [Self::build_text_with_offset] for more information.
+  pub fn build_lines_with_offset(
     &mut self,
     text: &[&str],
     font_size: usize,
@@ -522,15 +592,15 @@ impl<'a> SlugRendering<'a> {
       new_vertex_count,
       new_index_count,
       ..
-    } = self.build_text(
+    } = self.build_text_with_offset(
       text[0],
       font_size,
       Offset2D {
         x: offset.x,
         y: offset.y,
       },
-      vertex_offset,
       center_text,
+      vertex_offset,
       vertices,
       indices,
     );
@@ -550,15 +620,15 @@ impl<'a> SlugRendering<'a> {
         new_vertex_count,
         new_index_count,
         ..
-      } = self.build_text(
+      } = self.build_text_with_offset(
         line,
         font_size,
         Offset2D {
           x: offset.x,
           y: offset.y - line_offset,
         },
-        vertex_offset,
         center_text,
+        vertex_offset,
         vertices,
         indices,
       );
@@ -584,16 +654,6 @@ impl<'a> SlugRendering<'a> {
         new_vertex_count: total_vertex_count,
         new_index_count: total_index_count,
       },
-    }
-  }
-
-  /// Get a reference to texture data.
-  pub fn get_texture_data(&'a self) -> SlugTextureData<'a> {
-    SlugTextureData {
-      curve_tex_data: &self.glyph_processor.curve_tex_data,
-      band_tex_data: &self.glyph_processor.band_tex_data,
-      curve_tex_height: self.glyph_processor.curve_tex_height,
-      band_tex_height: self.glyph_processor.band_tex_height,
     }
   }
 }
